@@ -34,19 +34,37 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
+// Option customizes a Server built by New.
+type Option func(*Server)
+
+// WithNodeResolver supplies a lookup from atelet Pod UID to its scheduled
+// Kubernetes node name, used when the atelet's client certificate was issued
+// by cert-manager-csi-driver (which encodes PodUID in CommonName rather than a
+// custom extension carrying NodeName).
+func WithNodeResolver(resolve func(podUID string) (string, bool)) Option {
+	return func(s *Server) {
+		s.nodeResolver = resolve
+	}
+}
+
 // Server implements ateapipb.WorkerServiceServer.
 type Server struct {
 	ateapipb.UnimplementedWorkerServiceServer
 
 	// store is where a Worker's reported capacity is recorded, and the
 	// authoritative state the report is authorized against.
-	store store.Interface
+	store        store.Interface
+	nodeResolver func(podUID string) (string, bool)
 }
 
 var _ ateapipb.WorkerServiceServer = (*Server)(nil)
 
-func New(store store.Interface) *Server {
-	return &Server{store: store}
+func New(store store.Interface, opts ...Option) *Server {
+	s := &Server{store: store}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // SetWorkerCapacity records a Worker's reported capacity. As with MintCert,
@@ -55,6 +73,10 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 	caller, err := ateletauth.Authenticate(ctx)
 	if err != nil {
 		return nil, err
+	}
+	callerNode := caller.NodeName
+	if callerNode == "" && s.nodeResolver != nil && caller.PodUID != "" {
+		callerNode, _ = s.nodeResolver(caller.PodUID)
 	}
 	// Workers are global-scoped, so the reference carries no atespace.
 	if errs := resources.ValidateGlobalObjectRef(req.GetWorker(), field.NewPath("worker")); len(errs) > 0 {
@@ -77,12 +99,12 @@ func (s *Server) SetWorkerCapacity(ctx context.Context, req *ateapipb.SetWorkerC
 		}
 		return nil, fmt.Errorf("while fetching worker %s: %w", name, err)
 	}
-	if worker.GetNodeName() != caller.NodeName {
+	if worker.GetNodeName() != callerNode {
 		// Do not disclose Workers on other nodes.
 		slog.WarnContext(ctx, "Refusing a capacity report for a worker on another node",
 			slog.String("worker", name),
 			slog.String("worker_node", worker.GetNodeName()),
-			slog.String("caller_node", caller.NodeName),
+			slog.String("caller_node", callerNode),
 			slog.String("caller_pod", caller.PodName))
 		return nil, status.Errorf(codes.NotFound, "Worker %s not found", name)
 	}

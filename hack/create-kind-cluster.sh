@@ -18,6 +18,16 @@ set -o errexit -o nounset -o pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
+CERT_PROVIDER="${CERT_PROVIDER:-${ATE_CERT_PROVIDER:-podcertificate}}"
+case "${CERT_PROVIDER}" in
+  podcertificate|cert-manager)
+    ;;
+  *)
+    echo "error: CERT_PROVIDER must be podcertificate or cert-manager (got '${CERT_PROVIDER}')" >&2
+    exit 1
+    ;;
+esac
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-}"
 KUBECTL_CONTEXT="kind-${KIND_CLUSTER_NAME}"
 reg_name="kind-registry"
 reg_port="${KIND_REGISTRY_PORT:-5001}"
@@ -30,6 +40,8 @@ if [[ $# -gt 0 ]]; then
       echo
       echo "Configured through the environment:"
       echo "  KIND_CLUSTER_NAME  Name of the cluster to create (default: kind)."
+      echo "  CERT_PROVIDER      Certificate provider: podcertificate (default, K8s 1.36+) or cert-manager (K8s 1.32+)."
+      echo "  KIND_NODE_IMAGE    Kind node image to run (default: kind's built-in default)."
       echo "  IP_FAMILY          Address families for pods and Services: ipv4, ipv6 or dual (default: ipv4)."
       exit 0
       ;;
@@ -84,7 +96,7 @@ else
   echo "/dev/kvm not available: micro-VM support disabled (gVisor still works)."
 fi
 
-echo "Creating kind configuration for cluster '${KIND_CLUSTER_NAME}' (ipFamily=${IP_FAMILY})..."
+echo "Creating kind configuration for cluster '${KIND_CLUSTER_NAME}' (certProvider=${CERT_PROVIDER}, ipFamily=${IP_FAMILY})..."
 cat <<EOF > "${ROOT}/bin/kind-config.yaml"
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -100,7 +112,19 @@ if [ "${HAS_KVM}" = "1" ]; then
     containerPath: /dev/kvm
 EOF
 fi
-cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
+# kindest/node images before v1.35 bundle containerd < 2.2, which does not
+# enable /etc/containerd/certs.d by default.
+if [[ "${KIND_NODE_IMAGE}" =~ :v?([0-9]+)\.([0-9]+) ]] &&
+   (( 10#${BASH_REMATCH[1]} == 1 && 10#${BASH_REMATCH[2]} < 35 )); then
+  cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
+EOF
+fi
+if [ "${CERT_PROVIDER}" = "podcertificate" ]; then
+  cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
 # cmd/podcertcontroller depends on ClusterTrustBundle & PodCertificateRequest.
 # They are not enabled by default as of Kubernetes v1.36
 # https://github.com/kubernetes/kubernetes/blob/master/test/compatibility_lifecycle/reference/versioned_feature_list.yaml
@@ -110,6 +134,9 @@ featureGates:
   PodCertificateRequest: true
 runtimeConfig:
   "certificates.k8s.io/v1beta1": "true"
+EOF
+fi
+cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
 networking:
   ipFamily: ${IP_FAMILY}
 # The install pulls ~570MB of third-party images (postgres, prometheus, the otel
@@ -143,8 +170,10 @@ if [[ "${IP_FAMILY}" != "ipv4" &&
   fi
 fi
 
-echo "Creating kind cluster '${KIND_CLUSTER_NAME}'..."
-"${ROOT}"/hack/kind.sh create cluster --name "${KIND_CLUSTER_NAME}" --config "${ROOT}/bin/kind-config.yaml"
+echo "Creating kind cluster '${KIND_CLUSTER_NAME}'${KIND_NODE_IMAGE:+ (image=${KIND_NODE_IMAGE})}..."
+"${ROOT}"/hack/kind.sh create cluster --name "${KIND_CLUSTER_NAME}" \
+  ${KIND_NODE_IMAGE:+--image "${KIND_NODE_IMAGE}"} \
+  --config "${ROOT}/bin/kind-config.yaml"
 
 # A daemon with IPv6 off hands kind a v4-only network whatever it asked for.
 if [[ "${IP_FAMILY}" != "ipv4" &&

@@ -33,9 +33,9 @@ var deployAteSystemCmd = &cobra.Command{
 	Short: "Deploy the core system: CRDs, RBAC, store, apiserver, controller, atenet, and atelet",
 	Long: `Deploy the whole Agent Substrate control plane.
 
-This installs the CRDs and RBAC, the podcertificate controller and the secrets
-it signs, PostgreSQL, ate-api-server, ate-controller, the atenet dataplane, and
-the atelet DaemonSet, then waits for each to roll out.
+This installs the CRDs and RBAC, certificate infrastructure (podcertificate
+controller or cert-manager), PostgreSQL, ate-api-server, ate-controller, the
+atenet dataplane, and the atelet DaemonSet, then waits for each to roll out.
 
 The bundled PostgreSQL StatefulSet is skipped when
 ATE_API_POSTGRES_CONNECTION_STRING selects an external database. Cloud SQL is
@@ -43,7 +43,7 @@ not supported here — the ATE_API_POSTGRES_CLOUDSQL_* variables are ignored, so
 use hack/install-ate.sh for a Cloud SQL install (see
 cmd/ate-setup/differences.md).
 
-Shape the install with the global --atenet-dataplane flag.`,
+Shape the install with the global --atenet-dataplane and --cert-provider flags.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return env.DeployAteSystem(cmd.Context(), deployOpts)

@@ -1,0 +1,97 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Cert-manager variant of egressprobe.yaml.tmpl for clusters deployed with
+# --cert-provider=cert-manager.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: egressprobe
+  namespace: ${NAMESPACE}
+  labels:
+    app: egressprobe
+spec:
+  restartPolicy: Never
+  securityContext:
+    fsGroup: 65532
+  containers:
+  - name: egressprobe
+    image: ko://github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver
+    args:
+    - "egressprobe"
+    - "--listen=:8080"
+    ports:
+    - name: http
+      containerPort: 8080
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      periodSeconds: 2
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+    - name: "actor-identity-unknown"
+      mountPath: "/run/actor-identity-unknown"
+    - name: "podidentity"
+      mountPath: "/run/podidentity.podcert.ate.dev"
+    - name: "servicedns-ca"
+      mountPath: "/run/servicedns.podcert.ate.dev"
+  volumes:
+  - name: "actor-identity-unknown"
+    secret:
+      secretName: egressprobe-unknown-actor
+  - name: "podidentity"
+    csi:
+      driver: csi.cert-manager.io
+      readOnly: true
+      volumeAttributes:
+        csi.cert-manager.io/issuer-name: podidentity-issuer
+        csi.cert-manager.io/issuer-kind: ClusterIssuer
+        csi.cert-manager.io/common-name: "${POD_UID}"
+        csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+        csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+        csi.cert-manager.io/key-encoding: PKCS8
+        csi.cert-manager.io/key-algorithm: ECDSA
+        csi.cert-manager.io/key-size: "256"
+        csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+        csi.cert-manager.io/fs-group: "65532"
+  - name: "servicedns-ca"
+    configMap:
+      name: servicedns-trust-bundle
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: egressprobe
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: egressprobe
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080

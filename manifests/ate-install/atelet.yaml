@@ -36,11 +36,15 @@ rules:
 - apiGroups: ["ate.dev"]
   resources: ["sandboxconfigs"]
   verbs: ["get", "list", "watch"]
-# ClusterTrustBundles referenced by SystemInfo trustBundle data sources are
+# ClusterTrustBundles (podcertificate mode) and trust-manager ConfigMaps
+# (cert-manager mode) referenced by SystemInfo trustBundle data sources are
 # resolved on the node: atelet reads them through an informer and projects
 # the sanitized PEM into actors (see cmd/atelet/trustbundle.go).
 - apiGroups: ["certificates.k8s.io"]
   resources: ["clustertrustbundles"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: [""]
+  resources: ["configmaps"]
   verbs: ["get", "watch", "list"]
 ---
 # 3. Bind Identity to Permissions

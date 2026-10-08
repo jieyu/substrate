@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kustomize"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
@@ -69,19 +70,7 @@ func (e *Env) SetupCSI(ctx context.Context, driver string) error {
 	if err := e.EnsureAteSystemNamespace(ctx); err != nil {
 		return err
 	}
-	if err := e.EnsurePodCertificateCAs(ctx); err != nil {
-		return err
-	}
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
-		return err
-	}
-	if err := e.applyPodcertWorkersOverride(ctx); err != nil {
-		return err
-	}
-	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespacePodCert, "podcertificate-controller", e.Cfg.WaitTimeout(BootstrapTimeout)); err != nil {
-		return err
-	}
-	if err := e.WaitForPodCertificateTrustBundles(ctx); err != nil {
+	if err := e.EnsureCertificateInfra(ctx); err != nil {
 		return err
 	}
 
@@ -114,6 +103,9 @@ func (e *Env) setupCSIHostpath(ctx context.Context) error {
 
 	driverDir := e.Cfg.Path("hack", "third_party", "csi-driver-host-path")
 	deployDir := driverDir + "/deploy"
+	if e.Cfg.CertProvider == config.CertProviderCertManager {
+		deployDir = driverDir + "/deploy-cert-manager"
+	}
 
 	bundle, err := kustomize.Build(deployDir)
 	if err != nil {

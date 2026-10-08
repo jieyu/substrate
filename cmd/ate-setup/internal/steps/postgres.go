@@ -17,6 +17,7 @@ package steps
 import (
 	"context"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
@@ -35,6 +36,21 @@ func (e *Env) applyBundledPostgres(ctx context.Context) error {
 		log.Step("Skipping bundled PostgreSQL: external database configured (ATE_API_POSTGRES_CONNECTION_STRING)")
 		return nil
 	}
+	return e.applyPostgresManifest(ctx)
+}
+
+func (e *Env) applyPostgresManifest(ctx context.Context) error {
+	if e.Cfg.CertProvider == config.CertProviderCertManager {
+		overlay := installDir + "/cert-manager-postgres"
+		if e.Cfg.Kind {
+			overlay = installDir + "/kind/cert-manager-postgres"
+		}
+		manifest, err := e.Kustomize(overlay)
+		if err != nil {
+			return err
+		}
+		return e.Kube.ApplyBytes(ctx, manifest)
+	}
 	return e.Kube.ApplyPath(ctx, e.Cfg.Manifest("postgres", "postgres.yaml"))
 }
 
@@ -46,27 +62,14 @@ func (e *Env) DeployPostgres(ctx context.Context) error {
 	if err := e.EnsureAteSystemNamespace(ctx); err != nil {
 		return err
 	}
-	if err := e.EnsurePodCertificateCAs(ctx); err != nil {
+	// The StatefulSet's serving certificate comes from the configured
+	// certificate provider. Ensuring it here makes `deploy postgres` usable on
+	// a fresh cluster as well as after `deploy ate-system`.
+	if err := e.EnsureCertificateInfra(ctx); err != nil {
 		return err
 	}
 
-	// The StatefulSet's projected serving certificate is issued by this
-	// controller. Applying it here makes `deploy postgres` usable on a fresh
-	// cluster as well as after `deploy ate-system`.
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
-		return err
-	}
-	if err := e.applyPodcertWorkersOverride(ctx); err != nil {
-		return err
-	}
-	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespacePodCert, "podcertificate-controller", e.Cfg.WaitTimeout(BootstrapTimeout)); err != nil {
-		return err
-	}
-	if err := e.WaitForPodCertificateTrustBundles(ctx); err != nil {
-		return err
-	}
-
-	if err := e.Kube.ApplyPath(ctx, e.Cfg.Manifest("postgres", "postgres.yaml")); err != nil {
+	if err := e.applyPostgresManifest(ctx); err != nil {
 		return err
 	}
 	return e.Kube.RolloutStatus(ctx, kube.KindStatefulSet, NamespaceAteSystem, "postgres", e.Cfg.RolloutTimeout)

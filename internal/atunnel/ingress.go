@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/agent-substrate/substrate/internal/atenet"
+	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
@@ -150,14 +151,12 @@ func NewServer(cfg Config) (*Server, error) {
 		upstream:             cfg.Upstream,
 	}
 	s.tlsConfig = &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return loadCredentialBundle(s.credentialBundlePath)
-		},
-		ClientAuth: tls.RequireAndVerifyClientCert,
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: credbundle.Loader(s.credentialBundlePath),
+		ClientAuth:     tls.RequireAndVerifyClientCert,
 		// TODO(liorlieberman): reload the trust bundle per connection via
-		// GetConfigForClient, mirroring GetCertificate above. kubelet keeps the
-		// projected ClusterTrustBundle in sync with the signer, but this pool is
+		// GetConfigForClient, mirroring GetCertificate above. trust-manager keeps the
+		// trust bundle ConfigMap in sync with the signer, but this pool is
 		// frozen at process start, so after a CA rotation a long-lived worker
 		// rejects the router until its pod restarts.
 		ClientCAs: clientCAs,
@@ -236,15 +235,11 @@ func (t protocolMirrorTransport) CloseIdleConnections() {
 }
 
 func loadCredentialBundle(path string) (*tls.Certificate, error) {
-	pemBytes, err := os.ReadFile(path)
+	cert, err := credbundle.Parse(path)
 	if err != nil {
-		return nil, fmt.Errorf("atunnel: reading credential bundle: %w", err)
+		return nil, fmt.Errorf("atunnel: loading credential bundle: %w", err)
 	}
-	cert, err := tls.X509KeyPair(pemBytes, pemBytes)
-	if err != nil {
-		return nil, fmt.Errorf("atunnel: parsing credential bundle: %w", err)
-	}
-	return &cert, nil
+	return cert, nil
 }
 
 // Serve serves HTTPS on lis until ctx is canceled or the server fails.

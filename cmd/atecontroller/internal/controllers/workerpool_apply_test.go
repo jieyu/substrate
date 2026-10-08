@@ -811,3 +811,41 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 				WithLabels(map[string]string{"ate.dev/worker-pool": wp.Name}).
 				WithSpec(podSpecAC)))
 }
+
+func TestBuildDeploymentApplyConfigCertManager(t *testing.T) {
+	wp := testWorkerPoolApplyConfig(nil)
+	got := buildDeploymentApplyConfig(wp, ateomOTelSettings{}, CertProviderCertManager)
+
+	ps := got.Spec.Template.Spec
+	if len(ps.Volumes) != 5 {
+		t.Fatalf("len(Volumes) = %d, want 5", len(ps.Volumes))
+	}
+	if ps.Volumes[2].CSI == nil || *ps.Volumes[2].CSI.Driver != "csi.cert-manager.io" {
+		t.Errorf("Volumes[2] = %+v, want csi.cert-manager.io", ps.Volumes[2])
+	}
+	if ps.Volumes[3].ConfigMap == nil || *ps.Volumes[3].ConfigMap.Name != "podidentity-trust-bundle" {
+		t.Errorf("Volumes[3] = %+v, want ConfigMap podidentity-trust-bundle", ps.Volumes[3])
+	}
+	if ps.Volumes[4].ConfigMap == nil || *ps.Volumes[4].ConfigMap.Name != "servicedns-trust-bundle" {
+		t.Errorf("Volumes[4] = %+v, want ConfigMap servicedns-trust-bundle", ps.Volumes[4])
+	}
+
+	c := ps.Containers[0]
+	if !containerMountsPath(c, atunnelIdentityTrustMountPath) {
+		t.Errorf("ateom container does not mount %s", atunnelIdentityTrustMountPath)
+	}
+	wantCredArg := "--atunnel-credential-bundle=" + atunnelIdentityMountPath + "/tls.crt"
+	wantTrustArg := "--atunnel-trust-bundle=" + atunnelIdentityTrustMountPath + "/trust-bundle.pem"
+	hasCred, hasTrust := false, false
+	for _, arg := range c.Args {
+		if arg == wantCredArg {
+			hasCred = true
+		}
+		if arg == wantTrustArg {
+			hasTrust = true
+		}
+	}
+	if !hasCred || !hasTrust {
+		t.Errorf("args = %v, want %q and %q", c.Args, wantCredArg, wantTrustArg)
+	}
+}

@@ -218,8 +218,7 @@ func TestRenderServerPod(t *testing.T) {
 
 // TestRenderServerPod_Volumes covers the credential-carrying shape the sdsmint
 // suite deploys, with both volume kinds it needs: a plain Secret and a
-// projection. A projection is the interesting one — it nests three levels, so
-// it is what an off-by-two in the block indentation shows up in.
+// projection (ClusterTrustBundle for podcertificate, ConfigMap for cert-manager).
 func TestRenderServerPod_Volumes(t *testing.T) {
 	pod, _ := renderServerPodDocs(t, ServerPod{
 		Name:       "egressprobe",
@@ -229,6 +228,7 @@ func TestRenderServerPod_Volumes(t *testing.T) {
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "actor-identity", MountPath: "/run/actor-identity"},
 			{Name: "podidentity", MountPath: "/run/podidentity.podcert.ate.dev"},
+			{Name: "servicedns-ca", MountPath: "/run/servicedns.podcert.ate.dev"},
 		},
 		Volumes: []corev1.Volume{{
 			Name:         "actor-identity",
@@ -244,19 +244,32 @@ func TestRenderServerPod_Volumes(t *testing.T) {
 					},
 				}},
 			}},
+		}, {
+			Name: "servicedns-ca",
+			VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{{
+					ConfigMap: &corev1.ConfigMapProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "servicedns-trust-bundle"},
+						Items: []corev1.KeyToPath{{
+							Key:  "trust-bundle.pem",
+							Path: "trust-bundle.pem",
+						}},
+					},
+				}},
+			}},
 		}},
 	})
 
 	mounts := pod.Spec.Containers[0].VolumeMounts
-	if len(mounts) != 2 {
-		t.Fatalf("rendered %d volumeMounts, want 2: %+v", len(mounts), mounts)
+	if len(mounts) != 3 {
+		t.Fatalf("rendered %d volumeMounts, want 3: %+v", len(mounts), mounts)
 	}
 	if got, want := mounts[0].MountPath, "/run/actor-identity"; got != want {
 		t.Errorf("first mountPath = %q, want %q", got, want)
 	}
 
-	if len(pod.Spec.Volumes) != 2 {
-		t.Fatalf("rendered %d volumes, want 2: %+v", len(pod.Spec.Volumes), pod.Spec.Volumes)
+	if len(pod.Spec.Volumes) != 3 {
+		t.Fatalf("rendered %d volumes, want 3: %+v", len(pod.Spec.Volumes), pod.Spec.Volumes)
 	}
 	secret := pod.Spec.Volumes[0].Secret
 	if secret == nil || secret.SecretName != "probe-actor-identity" {
@@ -272,6 +285,14 @@ func TestRenderServerPod_Volumes(t *testing.T) {
 	}
 	if got := bundle.LabelSelector.MatchLabels["podcert.ate.dev/canarying"]; got != "live" {
 		t.Errorf("projected label selector = %+v, want the live canary label", bundle.LabelSelector)
+	}
+	cmProjected := pod.Spec.Volumes[2].Projected
+	if cmProjected == nil || len(cmProjected.Sources) != 1 || cmProjected.Sources[0].ConfigMap == nil {
+		t.Fatalf("third volume = %+v, want a configMap projection", pod.Spec.Volumes[2])
+	}
+	cm := cmProjected.Sources[0].ConfigMap
+	if got, want := cm.Name, "servicedns-trust-bundle"; got != want {
+		t.Errorf("projected configMap name = %q, want %q", got, want)
 	}
 
 	// Every mount has to name a volume that exists: a typo here yields a pod

@@ -40,6 +40,7 @@ func loadEnv(t *testing.T) {
 	for _, name := range []string{
 		"ANTHROPIC_API_KEY",
 		"ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE",
+		"ATE_CERT_PROVIDER",
 		"ATE_CREDENTIAL_INJECTION_ENABLED",
 		"ATE_CREDENTIAL_PROVIDER_ADDRESS",
 		"ATE_CREDENTIAL_PROVIDER_NAME",
@@ -78,11 +79,42 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Router != RouterEnvoy {
 		t.Errorf("Router = %q, want %q", cfg.Router, RouterEnvoy)
 	}
+	if cfg.CertProvider != CertProviderPodCertificate {
+		t.Errorf("CertProvider = %q, want %q", cfg.CertProvider, CertProviderPodCertificate)
+	}
 	if cfg.PostgresConnString() != DefaultPostgresConnectionString {
 		t.Errorf("PostgresConnString() = %q, want %q", cfg.PostgresConnString(), DefaultPostgresConnectionString)
 	}
 	if cfg.RolloutTimeout != DefaultRolloutTimeout {
 		t.Errorf("RolloutTimeout = %v, want %v", cfg.RolloutTimeout, DefaultRolloutTimeout)
+	}
+}
+
+func TestLoadCertProvider(t *testing.T) {
+	loadEnv(t)
+	t.Setenv("ATE_CERT_PROVIDER", CertProviderCertManager)
+
+	cfg, err := Load(Options{})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.CertProvider != CertProviderCertManager {
+		t.Errorf("CertProvider = %q, want %q", cfg.CertProvider, CertProviderCertManager)
+	}
+	if cfg.PostgresConnString() != CertManagerPostgresConnectionString {
+		t.Errorf("PostgresConnString() = %q, want %q", cfg.PostgresConnString(), CertManagerPostgresConnectionString)
+	}
+
+	// Flag beats environment.
+	cfg, err = Load(Options{CertProvider: CertProviderPodCertificate})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.CertProvider != CertProviderPodCertificate {
+		t.Errorf("CertProvider = %q, want %q", cfg.CertProvider, CertProviderPodCertificate)
+	}
+	if cfg.PostgresConnString() != DefaultPostgresConnectionString {
+		t.Errorf("PostgresConnString() = %q, want %q", cfg.PostgresConnString(), DefaultPostgresConnectionString)
 	}
 }
 
@@ -212,6 +244,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		opts Options
 	}{
 		{"router", Options{Router: "nginx"}},
+		{"cert provider", Options{CertProvider: "vault"}},
+		{"cert-manager with agentgateway", Options{CertProvider: CertProviderCertManager, Router: RouterAgentgateway}},
 		{"rollout timeout", Options{RolloutTimeout: "invalid"}},
 		{"podcert workers", Options{PodcertWorkersPerSigner: -1}},
 		{"extproc missing sdsmint", Options{AdditionalEgressExtprocService: "ate-system/extproc:50051"}},

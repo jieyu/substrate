@@ -79,7 +79,10 @@ func TLSConfig(credentialBundlePath, trustBundlePath string) (*tls.Config, error
 				return fmt.Errorf("node-local peer is not atelet")
 			}
 			identity, err := substratex509.PodIdentityFromCertificate(leaf)
-			if err != nil || identity == nil || identity.NodeName != localIdentity.NodeName || identity.NodeUID != localIdentity.NodeUID {
+			if err != nil || identity == nil || identity.PodUID == "" {
+				return fmt.Errorf("atelet certificate has no valid Pod identity")
+			}
+			if (localIdentity.NodeName != "" || identity.NodeName != "") && (identity.NodeName != localIdentity.NodeName || identity.NodeUID != localIdentity.NodeUID) {
 				return fmt.Errorf("atelet is not on worker node %q (%s)", localIdentity.NodeName, localIdentity.NodeUID)
 			}
 			return nil

@@ -21,39 +21,52 @@ import (
 	"slices"
 	"strings"
 
+	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 // EgressTrustBundleName is the well-known name of the egress gateway CA
-// bundle (#823): the trust anchors for the per-SNI leaves the egress gateway
+// bundle: the trust anchors for the per-SNI leaves the egress gateway
 // mints, maintained by atecontroller from the egress-mitm-ca-pool.
-const EgressTrustBundleName = "egress-mitm.ate.dev"
+const (
+	EgressTrustBundleName      = "egress-mitm.ate.dev"
+	trustBundleConfigMapKey    = "trust-bundle.pem"
+	trustBundleConfigNamespace = "ate-system"
 
-// supportedTrustBundles maps the bundle names the trustBundle data source
-// may reference to their backing ClusterTrustBundles.
-//
-// TODO(#932): select by signer name + label selector, merging the matches, so
-// a new root can be trialed on a subset of workloads.
-var supportedTrustBundles = map[string]string{
+	certProviderPodCertificate = "podcertificate"
+	certProviderCertManager    = "cert-manager"
+)
+
+// supportedClusterTrustBundles maps the bundle names the trustBundle data source
+// may reference to their backing ClusterTrustBundles in podcertificate mode.
+var supportedClusterTrustBundles = map[string]string{
 	EgressTrustBundleName: "egress-mitm.ate.dev:mitm:primary-bundle",
 }
 
+// supportedConfigMapTrustBundles maps the bundle names the trustBundle data source
+// may reference to their backing trust-manager synced ConfigMaps in ate-system
+// in cert-manager mode.
+var supportedConfigMapTrustBundles = map[string]string{
+	EgressTrustBundleName: "egress-mitm-trust-bundle",
+}
+
 // supportedTrustBundleNames returns the allowlist, sorted, for error text.
-func supportedTrustBundleNames() string {
-	names := make([]string, 0, len(supportedTrustBundles))
-	for name := range supportedTrustBundles {
+func supportedTrustBundleNames(allowlist map[string]string) string {
+	names := make([]string, 0, len(allowlist))
+	for name := range allowlist {
 		names = append(names, name)
 	}
 	slices.Sort(names)
 	return strings.Join(names, ", ")
 }
 
-// bundleNamesFor returns the allowlisted bundle names backed by the
-// ClusterTrustBundle objectName.
-func bundleNamesFor(objectName string) []string {
+// bundleNamesFor returns the allowlisted bundle names backed by objectName.
+func bundleNamesFor(allowlist map[string]string, objectName string) []string {
 	var names []string
-	for name, object := range supportedTrustBundles {
+	for name, object := range allowlist {
 		if object == objectName {
 			names = append(names, name)
 		}
@@ -61,20 +74,80 @@ func bundleNamesFor(objectName string) []string {
 	return names
 }
 
-// rawTrustBundle returns the unsanitized contents of the ClusterTrustBundle
-// backing the allowlisted bundle name.
-func rawTrustBundle(lister certlisters.ClusterTrustBundleLister, name string) (objectName, raw string, err error) {
-	objectName, supported := supportedTrustBundles[name]
+// trustBundleSource abstracts reading and watching backing trust bundle objects
+// across ClusterTrustBundle (podcertificate) and ConfigMap (cert-manager) modes.
+type trustBundleSource interface {
+	resourceKind() string
+	raw(name string) (objectName, raw string, err error)
+	bundleNamesForEvent(obj any) []string
+}
+
+type clusterTrustBundleSource struct {
+	lister certlisters.ClusterTrustBundleLister
+}
+
+func newClusterTrustBundleSource(lister certlisters.ClusterTrustBundleLister) trustBundleSource {
+	return &clusterTrustBundleSource{lister: lister}
+}
+
+func (s *clusterTrustBundleSource) resourceKind() string {
+	return "ClusterTrustBundle"
+}
+
+func (s *clusterTrustBundleSource) raw(name string) (objectName, raw string, err error) {
+	objectName, supported := supportedClusterTrustBundles[name]
 	if !supported {
-		return "", "", fmt.Errorf("trust bundle %q is not supported by this deployment (supported: %s)", name, supportedTrustBundleNames())
+		return "", "", fmt.Errorf("trust bundle %q is not supported by this deployment (supported: %s)", name, supportedTrustBundleNames(supportedClusterTrustBundles))
 	}
-	bundle, err := lister.Get(objectName)
+	bundle, err := s.lister.Get(objectName)
 	if apierrors.IsNotFound(err) {
 		return "", "", fmt.Errorf("trust bundle %q: ClusterTrustBundle %q not found", name, objectName)
 	} else if err != nil {
 		return "", "", fmt.Errorf("trust bundle %q: while reading ClusterTrustBundle %q: %w", name, objectName, err)
 	}
 	return objectName, bundle.Spec.TrustBundle, nil
+}
+
+func (s *clusterTrustBundleSource) bundleNamesForEvent(obj any) []string {
+	ctb, ok := obj.(*certsv1beta1.ClusterTrustBundle)
+	if !ok {
+		return nil
+	}
+	return bundleNamesFor(supportedClusterTrustBundles, ctb.Name)
+}
+
+type configMapTrustBundleSource struct {
+	lister corelisters.ConfigMapNamespaceLister
+}
+
+func newConfigMapTrustBundleSource(lister corelisters.ConfigMapNamespaceLister) trustBundleSource {
+	return &configMapTrustBundleSource{lister: lister}
+}
+
+func (s *configMapTrustBundleSource) resourceKind() string {
+	return "trust bundle ConfigMap"
+}
+
+func (s *configMapTrustBundleSource) raw(name string) (objectName, raw string, err error) {
+	objectName, supported := supportedConfigMapTrustBundles[name]
+	if !supported {
+		return "", "", fmt.Errorf("trust bundle %q is not supported by this deployment (supported: %s)", name, supportedTrustBundleNames(supportedConfigMapTrustBundles))
+	}
+	cm, err := s.lister.Get(objectName)
+	if apierrors.IsNotFound(err) {
+		return "", "", fmt.Errorf("trust bundle %q: ConfigMap %q not found", name, objectName)
+	} else if err != nil {
+		return "", "", fmt.Errorf("trust bundle %q: while reading ConfigMap %q: %w", name, objectName, err)
+	}
+	return objectName, cm.Data[trustBundleConfigMapKey], nil
+}
+
+func (s *configMapTrustBundleSource) bundleNamesForEvent(obj any) []string {
+	cm, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		return nil
+	}
+	return bundleNamesFor(supportedConfigMapTrustBundles, cm.Name)
 }
 
 // trustBundleHash hashes the raw backing contents. The sanitized output is

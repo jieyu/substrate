@@ -44,6 +44,7 @@ const (
 // Caller is the verified identity of an atelet.
 type Caller struct {
 	PodName  string
+	PodUID   string
 	NodeName string
 }
 
@@ -51,9 +52,7 @@ type Caller struct {
 // returns the identity that atelet's certificate asserts.
 //
 // The certificate chain is already verified by the TLS layer against the
-// pod-identity CA (see buildServerCreds in cmd/ateapi/main.go), so the
-// extensions read here are trustworthy: only the pod-identity signer can mint
-// a certificate carrying a given pod's node name.
+// pod-identity CA (see buildServerCreds in cmd/ateapi/main.go).
 func Authenticate(ctx context.Context) (*Caller, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
@@ -94,7 +93,7 @@ func Authenticate(ctx context.Context) (*Caller, error) {
 		return nil, denied()
 	}
 
-	return &Caller{PodName: identity.PodName, NodeName: identity.NodeName}, nil
+	return &Caller{PodName: identity.PodName, PodUID: identity.PodUID, NodeName: identity.NodeName}, nil
 }
 
 // denied is deliberately uniform: a caller learns that it is not atelet, and

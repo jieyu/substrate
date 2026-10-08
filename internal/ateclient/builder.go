@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	authv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -48,9 +49,16 @@ const (
 
 	// serviceDNSSignerName and liveBundleSelector mirror the
 	// clusterTrustBundle projected-volume sources that in-cluster clients
-	// mount to verify ateapi's serving cert.
+	// mount to verify ateapi's serving cert in podcertificate mode.
 	serviceDNSSignerName = "servicedns.podcert.ate.dev/identity"
 	liveBundleSelector   = "podcert.ate.dev/canarying=live"
+
+	// serviceDNSTrustBundleNamespace, serviceDNSTrustBundleConfigMap, and
+	// serviceDNSTrustBundleKey mirror the trust-manager synced ConfigMap that
+	// in-cluster clients mount to verify ateapi's serving cert in cert-manager mode.
+	serviceDNSTrustBundleNamespace = "ate-system"
+	serviceDNSTrustBundleConfigMap = "servicedns-trust-bundle"
+	serviceDNSTrustBundleKey       = "trust-bundle.pem"
 )
 
 // Client wraps the gRPC ControlClient and ensures the port-forward connection is closed when done.
@@ -114,10 +122,8 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
-	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1beta1 API in
-	// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
-	// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
-	// clusters), client-go will print out a warning every time it initializes.
+	// Suppress deprecation warnings when falling back to certificates.k8s.io/v1beta1
+	// ClusterTrustBundle in podcertificate mode.
 	config.WarningHandlerWithContext = &rest.NoWarnings{}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -171,10 +177,8 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
 
-	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1beta1 API in
-	// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
-	// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
-	// clusters), client-go will print out a warning every time it initializes.
+	// Suppress deprecation warnings when falling back to certificates.k8s.io/v1beta1
+	// ClusterTrustBundle in podcertificate mode.
 	config.WarningHandlerWithContext = &rest.NoWarnings{}
 
 	clientset, err := kubernetes.NewForConfig(config)
@@ -224,6 +228,28 @@ func dialPortForward(ctx context.Context, kubeconfigPath, k8sContext, tokenFile 
 }
 
 func serverTLSConfig(ctx context.Context, clientset kubernetes.Interface) (*tls.Config, error) {
+	// Check for the trust-manager synced ConfigMap first (cert-manager mode).
+	cm, err := clientset.CoreV1().ConfigMaps(serviceDNSTrustBundleNamespace).Get(ctx, serviceDNSTrustBundleConfigMap, metav1.GetOptions{})
+	if err == nil {
+		raw, ok := cm.Data[serviceDNSTrustBundleKey]
+		if !ok || raw == "" {
+			return nil, fmt.Errorf("ConfigMap %s/%s contains no %q entry", serviceDNSTrustBundleNamespace, serviceDNSTrustBundleConfigMap, serviceDNSTrustBundleKey)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(raw)) {
+			return nil, fmt.Errorf("ConfigMap %s/%s contains no valid certificates in %q", serviceDNSTrustBundleNamespace, serviceDNSTrustBundleConfigMap, serviceDNSTrustBundleKey)
+		}
+		return &tls.Config{
+			MinVersion: tls.VersionTLS13,
+			RootCAs:    pool,
+			ServerName: apiServerName,
+		}, nil
+	}
+	if !apierrors.IsNotFound(err) && !apierrors.IsForbidden(err) {
+		return nil, fmt.Errorf("failed to get ConfigMap %s/%s: %w", serviceDNSTrustBundleNamespace, serviceDNSTrustBundleConfigMap, err)
+	}
+
+	// Fall back to Kubernetes ClusterTrustBundles (podcertificate mode).
 	ctbs, err := clientset.CertificatesV1beta1().ClusterTrustBundles().List(ctx, metav1.ListOptions{
 		LabelSelector: liveBundleSelector,
 	})
@@ -243,7 +269,7 @@ func serverTLSConfig(ctx context.Context, clientset kubernetes.Interface) (*tls.
 		found = true
 	}
 	if !found {
-		return nil, fmt.Errorf("no live ClusterTrustBundle found for signer %q", serviceDNSSignerName)
+		return nil, fmt.Errorf("no servicedns trust bundle found in ConfigMap %s/%s or ClusterTrustBundles for signer %q", serviceDNSTrustBundleNamespace, serviceDNSTrustBundleConfigMap, serviceDNSSignerName)
 	}
 
 	return &tls.Config{

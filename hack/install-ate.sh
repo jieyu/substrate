@@ -82,6 +82,9 @@ function usage() {
   echo "  --delete-ate-system                    Delete core system"
   echo "  --delete-all                           Delete core system and all registered demos"
   echo "  --atenet-dataplane=envoy|agentgateway  Select the atenet ingress and egress dataplane (default: envoy)"
+  echo "  --cert-provider=podcertificate|cert-manager"
+  echo "                                         Select the certificate provider: podcertificate (default, K8s 1.36+)"
+  echo "                                         or cert-manager (K8s 1.32+)"
   echo "  --podcert-workers-per-signer N         Concurrent workers per podcertificate-controller signer (default: 1)"
   echo "  --rollout-timeout DURATION             Per-workload readiness wait timeout, kubectl-style Go duration (default: 60s)"
   echo "  --otlp-endpoint URL                    Send all control plane telemetry to URL, not to the cluster default (see benchmarking/telemetry/README.md)"
@@ -206,9 +209,23 @@ wait_for_pool_rollout_fatal() {
 }
 
 run_kubectl_ate() {
-  go run ./cmd/kubectl-ate \
-    ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} \
-    "$@"
+  local bin=""
+  if command -v kubectl-ate >/dev/null 2>&1; then
+    bin="kubectl-ate"
+  elif [[ -x "${ROOT}/bin/kubectl-ate" ]]; then
+    bin="${ROOT}/bin/kubectl-ate"
+  elif [[ -x "${GOPATH:-${HOME}/go}/bin/kubectl-ate" ]]; then
+    bin="${GOPATH:-${HOME}/go}/bin/kubectl-ate"
+  fi
+  if [[ -n "${bin}" ]]; then
+    "${bin}" \
+      ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} \
+      "$@"
+  else
+    go run ./cmd/kubectl-ate \
+      ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} \
+      "$@"
+  fi
 }
 
 run_ko() {
@@ -246,6 +263,18 @@ atenet_router() {
   esac
 }
 
+cert_provider() {
+  case "${ATE_CERT_PROVIDER:-podcertificate}" in
+    podcertificate|cert-manager)
+      echo "${ATE_CERT_PROVIDER:-podcertificate}"
+      ;;
+    *)
+      echo "Error: --cert-provider must be podcertificate or cert-manager, got '${ATE_CERT_PROVIDER}'" >&2
+      exit 1
+      ;;
+  esac
+}
+
 podcert_workers_per_signer() {
   local workers="${ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER:-1}"
   if ! [[ "${workers}" =~ ^[1-9][0-9]*$ ]]; then
@@ -265,7 +294,11 @@ rollout_timeout() {
 }
 
 default_postgres_connection_string() {
-  echo "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns.podcert.ate.dev/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/credential-bundle.pem&sslkey=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    echo "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns-ca/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/tls.crt&sslkey=/run/podidentity.podcert.ate.dev/tls.key"
+  else
+    echo "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns.podcert.ate.dev/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/credential-bundle.pem&sslkey=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+  fi
 }
 
 # True if deploying the bundled in-cluster PostgreSQL. Returns false if an
@@ -330,6 +363,21 @@ label_nodes_substrate_version() {
 render_ate_system_manifests() {
   local router=""
   router="$(atenet_router)"
+  local provider=""
+  provider="$(cert_provider)"
+
+  if [[ "${provider}" == "cert-manager" ]]; then
+    if [[ "${router}" == "agentgateway" ]]; then
+      echo "Error: --cert-provider=cert-manager requires --atenet-dataplane=envoy" >&2
+      return 1
+    fi
+    local overlay="manifests/ate-install/cert-manager"
+    if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+      overlay="manifests/ate-install/kind-cert-manager"
+    fi
+    kubectl kustomize "${overlay}" --load-restrictor LoadRestrictionsNone | run_ko resolve -f - | substitute_version
+    return
+  fi
 
   if [[ "${router}" == "agentgateway" ]]; then
     local overlay="manifests/ate-install/agentgateway"
@@ -350,6 +398,15 @@ render_ate_system_manifests() {
 }
 
 render_atenet_router_manifest() {
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    if [[ "$(atenet_router)" == "agentgateway" ]]; then
+      echo "Error: --cert-provider=cert-manager requires --atenet-dataplane=envoy" >&2
+      return 1
+    fi
+    kubectl kustomize manifests/ate-install/cert-manager-router \
+      --load-restrictor LoadRestrictionsNone | run_ko resolve -f -
+    return
+  fi
   if [[ "$(atenet_router)" == "agentgateway" ]]; then
     kubectl kustomize manifests/ate-install/agentgateway-router \
       --load-restrictor LoadRestrictionsNone | run_ko resolve -f -
@@ -374,6 +431,10 @@ atenet_egress_manifest() {
 
 render_atenet_egress_manifest() {
   if [[ "$(atenet_router)" == "agentgateway" ]]; then
+    if [[ "$(cert_provider)" == "cert-manager" ]]; then
+      echo "Error: --cert-provider=cert-manager requires --atenet-dataplane=envoy" >&2
+      return 1
+    fi
     # The markers live inside Envoy's bootstrap, so there is nowhere here to
     # put the filter. Refuse for the same reason patch_atenet_egress_manifest
     # refuses a non-sdsmint manifest: ignoring the flag would report a
@@ -391,6 +452,16 @@ render_atenet_egress_manifest() {
       agentgateway_egress="manifests/ate-install/agentgateway-egress-mitm"
     fi
     kubectl kustomize "${agentgateway_egress}" \
+      --load-restrictor LoadRestrictionsNone | run_ko resolve -f -
+    return
+  fi
+
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    local cert_manager_egress="manifests/ate-install/cert-manager-egress"
+    if [[ "${ATE_EXPERIMENTAL_USE_SDSMINT:-false}" == "true" ]]; then
+      cert_manager_egress="manifests/ate-install/cert-manager-egress-mitm"
+    fi
+    kubectl kustomize "${cert_manager_egress}" \
       --load-restrictor LoadRestrictionsNone | run_ko resolve -f -
     return
   fi
@@ -444,6 +515,15 @@ apply_otel_config() {
 }
 
 apply_postgres() {
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    local pg_overlay="manifests/ate-install/cert-manager-postgres"
+    if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+      pg_overlay="manifests/ate-install/kind/cert-manager-postgres"
+    fi
+    kubectl kustomize "${pg_overlay}" \
+      --load-restrictor LoadRestrictionsNone | run_kubectl apply -f -
+    return
+  fi
   if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
     kubectl kustomize manifests/ate-install/kind/postgres \
       --load-restrictor LoadRestrictionsNone | run_kubectl apply -f -
@@ -595,6 +675,34 @@ wait_for_podcertificate_trust_bundles() {
     sleep 1
   done
   until run_kubectl get clustertrustbundles servicedns.podcert.ate.dev:identity:primary-bundle >/dev/null 2>&1; do
+    sleep 1
+  done
+}
+
+ensure_cert_manager() {
+  log_step "ensure_cert_manager"
+  run_kubectl create namespace cert-manager --dry-run=client -o yaml \
+    | run_kubectl apply -f -
+  run_kubectl apply -f hack/third_party/cert-manager/deploy/cert-manager.yaml
+  run_kubectl rollout status deployment/cert-manager -n cert-manager --timeout=120s
+  run_kubectl rollout status deployment/cert-manager-cainjector -n cert-manager --timeout=120s
+  run_kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=120s
+
+  run_kubectl apply -f hack/third_party/cert-manager/deploy/cert-manager-csi-driver.yaml
+  run_kubectl apply -f hack/third_party/cert-manager/deploy/trust-manager.yaml
+  run_kubectl rollout status daemonset/cert-manager-csi-driver -n cert-manager --timeout=120s
+  run_kubectl rollout status deployment/trust-manager -n cert-manager --timeout=120s
+
+  run_kubectl apply -f manifests/ate-install/cert-manager-issuers.yaml
+  wait_for_trust_bundles
+}
+
+wait_for_trust_bundles() {
+  echo "Waiting for trust-manager trust bundle ConfigMaps to be ready..."
+  until [[ -n "$(run_kubectl get configmap -n ate-system podidentity-trust-bundle -o jsonpath='{.data.trust-bundle\.pem}' 2>/dev/null)" ]]; do
+    sleep 1
+  done
+  until [[ -n "$(run_kubectl get configmap -n ate-system servicedns-trust-bundle -o jsonpath='{.data.trust-bundle\.pem}' 2>/dev/null)" ]]; do
     sleep 1
   done
 }
@@ -899,6 +1007,8 @@ setup_csi() {
       ;;
   esac
   log_step "setup_csi (${driver})"
+  ATE_CERT_PROVIDER="$(cert_provider)"
+  export ATE_CERT_PROVIDER
   case "${driver}" in
     nfs)
       "${ROOT}/hack/setup-csi-nfs-kind.sh"
@@ -956,16 +1066,19 @@ deploy_ate_system() {
 
   ensure_apiserver_prerequisites
 
-  # Deploy podcertificate-controller first so it starts signing and creating trust bundles immediately
-  run_ko apply -f manifests/ate-install/pod-certificate-controller.yaml
-  apply_podcert_workers_override
-  run_kubectl rollout status deployment/podcertificate-controller -n podcertificate-controller-system --timeout=120s
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    ensure_cert_manager
+  else
+    # Deploy podcertificate-controller first so it starts signing and creating trust bundles immediately
+    run_ko apply -f manifests/ate-install/pod-certificate-controller.yaml
+    apply_podcert_workers_override
+    run_kubectl rollout status deployment/podcertificate-controller -n podcertificate-controller-system --timeout=120s
 
-  wait_for_podcertificate_trust_bundles
+    wait_for_podcertificate_trust_bundles
+  fi
 
-  # CSI setup must run after podcertificate-controller is ready and trust bundles
-  # exist. The ghostunnel sidecar uses projected podCertificate and clusterTrustBundle
-  # volumes which cannot be fulfilled until podcertcontroller is actively signing,
+  # CSI setup must run after certificate infrastructure and trust bundles
+  # exist. The envoy sidecar uses certificates and trust bundles,
   # otherwise rollout of csi-hostpath-socat times out.
   #
   # setup_csi is a no-op unless --setup-csi asked for a driver, and it is the
@@ -1020,8 +1133,10 @@ ensure_apiserver_prerequisites() {
   # Derived from actor-id-ca-pool above, so it must come after it.
   run_kubectl get secret -n ate-system actor-id-ca-certs >/dev/null 2>&1 \
     || create_actor_id_ca_certs_secret
-  run_kubectl get secret -n podcertificate-controller-system service-dns-ca-pool >/dev/null 2>&1 \
-    || create_podcertificate_controller_cas
+  if [[ "$(cert_provider)" != "cert-manager" ]]; then
+    run_kubectl get secret -n podcertificate-controller-system service-dns-ca-pool >/dev/null 2>&1 \
+      || create_podcertificate_controller_cas
+  fi
   # Always reconcile the PostgreSQL connection settings.
   create_api_server_env_vars
   run_kubectl get configmap -n ate-system ate-api-authentication >/dev/null 2>&1 \
@@ -1041,7 +1156,12 @@ deploy_ate_apiserver() {
   apply_otel_config
   apply_otel_endpoint_override
 
-  run_ko apply -f manifests/ate-install/ate-api-server.yaml
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    kubectl kustomize manifests/ate-install/cert-manager-apiserver \
+      --load-restrictor LoadRestrictionsNone | run_ko apply -f -
+  else
+    run_ko apply -f manifests/ate-install/ate-api-server.yaml
+  fi
   reconcile_cloudsql_proxy_sidecar
   run_kubectl rollout status deployment/ate-api-server -n ate-system --timeout="$(rollout_timeout)"
 }
@@ -1094,7 +1214,13 @@ deploy_atelet() {
   apply_otel_endpoint_override
 
   local manifest=""
-  if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    local atelet_overlay="manifests/ate-install/cert-manager-atelet"
+    if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+      atelet_overlay="manifests/ate-install/kind/cert-manager-atelet"
+    fi
+    manifest=$(kubectl kustomize "${atelet_overlay}" --load-restrictor LoadRestrictionsNone | run_ko resolve -f - | substitute_version)
+  elif [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
     # Use Kustomize to build and resolve the atelet DaemonSet patch
     manifest=$(kubectl kustomize manifests/ate-install/kind/atelet --load-restrictor LoadRestrictionsNone | run_ko resolve -f - | substitute_version)
   else
@@ -1365,7 +1491,14 @@ delete_substrate_demo() {
 
 delete_ate_system() {
   log_step "delete_ate_system"
-  if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+  if [[ "$(cert_provider)" == "cert-manager" ]]; then
+    local overlay="manifests/ate-install/cert-manager"
+    if [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
+      overlay="manifests/ate-install/kind-cert-manager"
+    fi
+    kubectl kustomize "${overlay}" --load-restrictor LoadRestrictionsNone \
+      | run_kubectl delete --ignore-not-found -f -
+  elif [[ "${ATE_INSTALL_KIND:-false}" == "true" ]]; then
     kubectl kustomize manifests/ate-install/kind --load-restrictor LoadRestrictionsNone \
       | run_kubectl delete --ignore-not-found -f -
   else
@@ -1471,6 +1604,14 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
       fi
       ATE_ATENET_DATAPLANE="${prescan_args[$((i + 1))]}"
       ;;
+    --cert-provider=*) ATE_CERT_PROVIDER="${prescan_args[i]#*=}" ;;
+    --cert-provider)
+      if (( i + 1 >= ${#prescan_args[@]} )); then
+        echo "Error: --cert-provider requires podcertificate or cert-manager" >&2
+        exit 1
+      fi
+      ATE_CERT_PROVIDER="${prescan_args[$((i + 1))]}"
+      ;;
     --experimental-use-sdsmint) ATE_EXPERIMENTAL_USE_SDSMINT=true ;;
     --experimental-additional-egress-extproc-service=*)
       ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE="${prescan_args[i]#*=}"
@@ -1569,6 +1710,7 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
   esac
 done
 atenet_router >/dev/null
+cert_provider >/dev/null
 case "${BENCHMARK_SANDBOX_CLASS}" in
   gvisor|microvm) ;;
   *)
@@ -1605,6 +1747,15 @@ while [[ "$#" -gt 0 ]]; do
         exit 1
       fi
       ATE_ATENET_DATAPLANE="$1"
+      ;;
+    --cert-provider=*) ATE_CERT_PROVIDER="${1#*=}" ;;
+    --cert-provider)
+      shift
+      if [[ "$#" -eq 0 ]]; then
+        echo "Error: --cert-provider requires podcertificate or cert-manager" >&2
+        exit 1
+      fi
+      ATE_CERT_PROVIDER="$1"
       ;;
     # Captured in the pre-scan above; matched here only so the `*)` branch does
     # not reject it as an unknown option.

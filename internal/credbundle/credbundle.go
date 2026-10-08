@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package credbundle handles credential bundle files written by Kubernetes Pod Certificates.
+// Package credbundle handles credential files written by cert-manager-csi-driver
+// (separate tls.crt and tls.key files) as well as single-file PEM credential bundles.
 //
-// A credential bundle is a single file with multiple PEM entries. The first entry is a PRIVATE KEY
-// block, and all remaining entries are CERTIFICATE blocks. The CERTIFICATE blocks are in
-// leaf-to-root order, and may or may not include the root.
+// In a single-file bundle, the file contains a PRIVATE KEY block and one or more
+// CERTIFICATE blocks in leaf-to-root order. When separate tls.crt and tls.key
+// files are used (or a directory containing them is passed), tls.crt holds the
+// CERTIFICATE blocks and tls.key holds the PKCS#8 PRIVATE KEY block.
 package credbundle
 
 import (
@@ -25,15 +27,18 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
-// Loader reads a private key and certificate chain from a credential bundle file as written by the
-// Kubernetes Pod Certificates mechanism.
+// Loader reads a private key and certificate chain from path, which may be a
+// single-file PEM credential bundle, a tls.crt file (paired with a sibling
+// tls.key), or a directory containing tls.crt and tls.key as written by
+// cert-manager-csi-driver.
 //
 // Returns a function that can be used as GetCertificate in a tls.Config. The parsed bundle is
-// cached: each handshake stats the file and re-reads it only when the file has changed, so
-// pod-certificate rotations are picked up on the next handshake without paying the read and
+// cached: each handshake stats the file(s) and re-reads them only when they have changed, so
+// certificate rotations are picked up on the next handshake without paying the read and
 // parse cost when nothing changed.
 func Loader(path string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	c := &certCache{path: path}
@@ -44,7 +49,7 @@ func Loader(path string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 
 // ClientLoader is the client-side counterpart to Loader. It returns a function
 // suitable for use as GetClientCertificate in a tls.Config, caching the parsed
-// bundle in the same way so that pod-certificate rotations are picked up on
+// bundle in the same way so that certificate rotations are picked up on
 // the next handshake.
 func ClientLoader(path string) func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	c := &certCache{path: path}
@@ -53,62 +58,127 @@ func ClientLoader(path string) func(*tls.CertificateRequestInfo) (*tls.Certifica
 	}
 }
 
-// certCache holds the parse of a credential bundle file together with the stat
-// of the file it was parsed from, so unchanged files are not re-parsed on
+// certCache holds the parse of credential file(s) together with the stat
+// of the file(s) it was parsed from, so unchanged files are not re-parsed on
 // every TLS handshake.
 type certCache struct {
 	path string
 
 	mu sync.Mutex
-	// fi is the stat of path taken just before cert was parsed; nil until the
-	// first successful parse. cert is served while a fresh stat of path still
-	// matches it.
-	fi   os.FileInfo
-	cert *tls.Certificate
+	// certFI and keyFI are the stats taken just before cert was parsed; nil
+	// until the first successful parse. cert is served while fresh stats still
+	// match them.
+	certFI os.FileInfo
+	keyFI  os.FileInfo
+	cert   *tls.Certificate
 }
 
-// get returns the parsed bundle, re-reading the file only when it has changed
+func sameStat(a, b os.FileInfo) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return os.SameFile(a, b) && b.ModTime().Equal(a.ModTime()) && b.Size() == a.Size()
+}
+
+func resolvePaths(path string) (certPath, keyPath string, certFI, keyFI os.FileInfo, err error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			dir := filepath.Dir(path)
+			switch filepath.Base(path) {
+			case "credential-bundle.pem":
+				crt := filepath.Join(dir, "tls.crt")
+				key := filepath.Join(dir, "tls.key")
+				if cfi, cerr := os.Stat(crt); cerr == nil && !cfi.IsDir() {
+					if kfi, kerr := os.Stat(key); kerr == nil && !kfi.IsDir() {
+						return crt, key, cfi, kfi, nil
+					}
+				}
+			case "tls.crt":
+				bundle := filepath.Join(dir, "credential-bundle.pem")
+				if bfi, berr := os.Stat(bundle); berr == nil && !bfi.IsDir() {
+					return bundle, "", bfi, nil, nil
+				}
+			}
+		}
+		return "", "", nil, nil, fmt.Errorf("while getting file info for credential bundle %q: %w", path, err)
+	}
+	if fi.IsDir() {
+		certPath = filepath.Join(path, "tls.crt")
+		keyPath = filepath.Join(path, "tls.key")
+		if certFI, err = os.Stat(certPath); err == nil {
+			keyFI, err = os.Stat(keyPath)
+			if err != nil {
+				return "", "", nil, nil, fmt.Errorf("while getting file info for private key %q: %w", keyPath, err)
+			}
+			return certPath, keyPath, certFI, keyFI, nil
+		}
+		bundle := filepath.Join(path, "credential-bundle.pem")
+		if bfi, berr := os.Stat(bundle); berr == nil && !bfi.IsDir() {
+			return bundle, "", bfi, nil, nil
+		}
+		return "", "", nil, nil, fmt.Errorf("while getting file info for certificate %q: %w", certPath, err)
+	}
+	if filepath.Base(path) == "tls.crt" {
+		siblingKey := filepath.Join(filepath.Dir(path), "tls.key")
+		if kfi, kerr := os.Stat(siblingKey); kerr == nil && !kfi.IsDir() {
+			return path, siblingKey, fi, kfi, nil
+		}
+	}
+	return path, "", fi, nil, nil
+}
+
+// get returns the parsed bundle, re-reading the file(s) only when they have changed
 // since the last successful parse.
 //
 // A change is any difference in file identity (os.SameFile: device and inode
-// on Unix), modification time, or size. The kubelet rotates projected volume
-// contents, including pod certificates, by writing a fresh timestamped
-// directory and atomically swapping a symlink to it, so a rotation always
-// surfaces here as a change of file identity; mtime and size additionally
-// cover in-place rewrites, whose mid-write states a reader may also observe.
-//
-// The file can still change between the stat and the read below. The parse of
-// the newer content is then stored against the older stat, so the next call
-// sees a stat mismatch and re-reads; the cache never lags a rotation by more
-// than one handshake. Errors leave the previous entry in place and are
-// returned to the caller: handshakes fail exactly as they would without
-// caching, and every later call retries until a parse succeeds.
+// on Unix), modification time, or size. Both projected volumes and
+// cert-manager-csi-driver rotate contents atomically via symlinks or renames,
+// which surfaces here as a change of file identity; mtime and size additionally
+// cover in-place rewrites.
 func (c *certCache) get() (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fi, err := os.Stat(c.path)
-	if err != nil {
-		return nil, fmt.Errorf("while getting file info for credential bundle %q: %w", c.path, err)
-	}
-	if c.cert != nil && os.SameFile(c.fi, fi) && fi.ModTime().Equal(c.fi.ModTime()) && fi.Size() == c.fi.Size() {
-		return c.cert, nil
-	}
-
-	cert, err := Parse(c.path)
+	certPath, keyPath, certFI, keyFI, err := resolvePaths(c.path)
 	if err != nil {
 		return nil, err
 	}
-	c.fi, c.cert = fi, cert
+	if c.cert != nil && sameStat(c.certFI, certFI) && sameStat(c.keyFI, keyFI) {
+		return c.cert, nil
+	}
+
+	cert, err := parseFiles(certPath, keyPath)
+	if err != nil {
+		return nil, err
+	}
+	c.certFI, c.keyFI, c.cert = certFI, keyFI, cert
 	return cert, nil
 }
 
-// Parse reads a private key and certificate chain from a credential bundle file as written by the
-// Kubernetes Pod Certificates mechanism.
+// Parse reads a private key and certificate chain from bundlePath, which may be
+// a single-file PEM bundle, a tls.crt file (with a sibling tls.key), or a
+// directory containing tls.crt and tls.key.
 func Parse(bundlePath string) (*tls.Certificate, error) {
-	bundleBytes, err := os.ReadFile(bundlePath)
+	certPath, keyPath, _, _, err := resolvePaths(bundlePath)
+	if err != nil {
+		return nil, err
+	}
+	return parseFiles(certPath, keyPath)
+}
+
+func parseFiles(certPath, keyPath string) (*tls.Certificate, error) {
+	bundleBytes, err := os.ReadFile(certPath)
 	if err != nil {
 		return nil, fmt.Errorf("while reading credential bundle: %w", err)
+	}
+	if keyPath != "" {
+		keyBytes, err := os.ReadFile(keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("while reading private key %q: %w", keyPath, err)
+		}
+		bundleBytes = append(bundleBytes, '\n')
+		bundleBytes = append(bundleBytes, keyBytes...)
 	}
 
 	var leafKeyBytes []byte

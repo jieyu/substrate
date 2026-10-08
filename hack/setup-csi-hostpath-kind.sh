@@ -22,7 +22,12 @@ ROOT="$(git rev-parse --show-toplevel)"
 
 # Define paths
 DRIVER_DIR="${ROOT}/hack/third_party/csi-driver-host-path"
-DEPLOY_DIR="${DRIVER_DIR}/deploy"
+CERT_PROVIDER="${ATE_CERT_PROVIDER:-${CERT_PROVIDER:-podcertificate}}"
+if [[ "${CERT_PROVIDER}" == "cert-manager" ]]; then
+  DEPLOY_DIR="${DRIVER_DIR}/deploy-cert-manager"
+else
+  DEPLOY_DIR="${DRIVER_DIR}/deploy"
+fi
 
 # 1. Clean up existing deployment if present
 echo "Cleaning up existing CSI Hostpath resources..."

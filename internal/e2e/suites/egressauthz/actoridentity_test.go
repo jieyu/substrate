@@ -65,7 +65,8 @@ const (
 
 	// podIdentityCredentialPath is the probe's own workload identity: a valid
 	// substrate credential that is not an actor. It is mounted so the suite can
-	// show the gateway refusing it.
+	// show the gateway refusing it. credbundle.Parse falls back to sibling
+	// tls.crt + tls.key when cert-manager CSI is used.
 	podIdentityCredentialPath = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
 )
 

@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
@@ -49,9 +50,9 @@ type DeployOptions struct {
 	SetupCSI string
 }
 
-// DeployAteSystem installs the whole control plane: CRDs, RBAC, the
-// podcertificate controller, the store, ateapi, the controller, atenet, and
-// atelet.
+// DeployAteSystem installs the whole control plane: CRDs, RBAC, certificate
+// infrastructure (podcertificate controller or cert-manager), the store,
+// ateapi, the controller, atenet, and atelet.
 func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	log.Step("deploy_ate_system")
 
@@ -82,18 +83,9 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 		return err
 	}
 
-	// The podcertificate controller goes first so it starts signing and
-	// publishing trust bundles immediately.
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
-		return err
-	}
-	if err := e.applyPodcertWorkersOverride(ctx); err != nil {
-		return err
-	}
-	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespacePodCert, "podcertificate-controller", e.Cfg.WaitTimeout(BootstrapTimeout)); err != nil {
-		return err
-	}
-	if err := e.WaitForPodCertificateTrustBundles(ctx); err != nil {
+	// Certificate infrastructure goes first so trust bundles and certificates
+	// are ready before CSI and workloads start.
+	if err := e.EnsureCertificateInfra(ctx); err != nil {
 		return err
 	}
 	if err := e.SetupCSI(ctx, opts.SetupCSI); err != nil {
@@ -234,8 +226,18 @@ func (e *Env) DeployAteAPIServer(ctx context.Context) error {
 	if err := e.applyOtelConfig(ctx); err != nil {
 		return err
 	}
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("ate-api-server.yaml")); err != nil {
-		return err
+	if e.Cfg.CertProvider == config.CertProviderCertManager {
+		manifest, err := e.KustomizeResolve(ctx, installDir+"/cert-manager-apiserver")
+		if err != nil {
+			return err
+		}
+		if err := e.Kube.ApplyBytes(ctx, manifest); err != nil {
+			return err
+		}
+	} else {
+		if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("ate-api-server.yaml")); err != nil {
+			return err
+		}
 	}
 	return e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespaceAteSystem, "ate-api-server", e.Cfg.RolloutTimeout)
 }
@@ -253,8 +255,18 @@ func (e *Env) DeployAteController(ctx context.Context) error {
 	if err := e.applyOtelConfig(ctx); err != nil {
 		return err
 	}
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("ate-controller.yaml")); err != nil {
-		return err
+	if e.Cfg.CertProvider == config.CertProviderCertManager {
+		manifest, err := e.KustomizeResolve(ctx, installDir+"/cert-manager-controller")
+		if err != nil {
+			return err
+		}
+		if err := e.Kube.ApplyBytes(ctx, manifest); err != nil {
+			return err
+		}
+	} else {
+		if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("ate-controller.yaml")); err != nil {
+			return err
+		}
 	}
 	return e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespaceAteSystem, "ate-controller", e.Cfg.RolloutTimeout)
 }
@@ -278,10 +290,15 @@ func (e *Env) DeployAtelet(ctx context.Context) error {
 
 	var manifest []byte
 	var err error
-	if e.Cfg.Kind {
+	switch {
+	case e.Cfg.CertProvider == config.CertProviderCertManager && e.Cfg.Kind:
+		manifest, err = e.KustomizeResolve(ctx, installDir+"/kind/cert-manager-atelet")
+	case e.Cfg.CertProvider == config.CertProviderCertManager:
+		manifest, err = e.KustomizeResolve(ctx, installDir+"/cert-manager-atelet")
+	case e.Cfg.Kind:
 		// The kind overlay patches the DaemonSet for the local node layout.
 		manifest, err = e.KustomizeResolve(ctx, installDir+"/kind/atelet")
-	} else {
+	default:
 		manifest, err = e.ResolveManifest(ctx, e.Cfg.Manifest("atelet.yaml"))
 	}
 	if err != nil {

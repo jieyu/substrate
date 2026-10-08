@@ -24,6 +24,51 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 )
 
+func TestSystemOverlay(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+		want string
+	}{
+		{
+			name: "default podcertificate GKE",
+			cfg:  config.Config{Router: config.RouterEnvoy, CertProvider: config.CertProviderPodCertificate},
+			want: "",
+		},
+		{
+			name: "default podcertificate Kind",
+			cfg:  config.Config{Kind: true, Router: config.RouterEnvoy, CertProvider: config.CertProviderPodCertificate},
+			want: "manifests/ate-install/kind",
+		},
+		{
+			name: "agentgateway GKE",
+			cfg:  config.Config{Router: config.RouterAgentgateway, CertProvider: config.CertProviderPodCertificate},
+			want: "manifests/ate-install/agentgateway",
+		},
+		{
+			name: "agentgateway Kind",
+			cfg:  config.Config{Kind: true, Router: config.RouterAgentgateway, CertProvider: config.CertProviderPodCertificate},
+			want: "manifests/ate-install/kind-agentgateway",
+		},
+		{
+			name: "cert-manager GKE",
+			cfg:  config.Config{Router: config.RouterEnvoy, CertProvider: config.CertProviderCertManager},
+			want: "manifests/ate-install/cert-manager",
+		},
+		{
+			name: "cert-manager Kind",
+			cfg:  config.Config{Kind: true, Router: config.RouterEnvoy, CertProvider: config.CertProviderCertManager},
+			want: "manifests/ate-install/kind-cert-manager",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SystemOverlay(&tc.cfg); got != tc.want {
+				t.Errorf("SystemOverlay() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // Splicing credential injection into the real sdsmint manifest replaces the
 // marker and adds the provider flags to the egress sidecar. CI deploys the
 // sdsmint variant but never with injection, so this is the only automated check

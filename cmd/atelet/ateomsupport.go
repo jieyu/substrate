@@ -78,7 +78,8 @@ func authenticatedWorkerIdentity(ctx context.Context) (*substratex509.PodIdentit
 }
 
 // verifyClientOnSameNode returns a TLS callback that accepts only worker Pods
-// scheduled on the atelet's node incarnation.
+// with a valid Pod identity (and on the same node incarnation when NodeName is
+// populated in the certificates).
 func verifyClientOnSameNode(node *substratex509.PodIdentity) func(tls.ConnectionState) error {
 	return func(state tls.ConnectionState) error {
 		if len(state.PeerCertificates) == 0 {
@@ -88,7 +89,10 @@ func verifyClientOnSameNode(node *substratex509.PodIdentity) func(tls.Connection
 		if err != nil {
 			return fmt.Errorf("parse worker Pod identity: %w", err)
 		}
-		if identity == nil || identity.NodeName != node.NodeName || identity.NodeUID != node.NodeUID {
+		if identity == nil || identity.PodUID == "" {
+			return fmt.Errorf("worker certificate has no valid Pod identity")
+		}
+		if (node.NodeName != "" || identity.NodeName != "") && (identity.NodeName != node.NodeName || identity.NodeUID != node.NodeUID) {
 			return fmt.Errorf("worker is not on node %q (%s)", node.NodeName, node.NodeUID)
 		}
 		return nil

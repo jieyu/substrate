@@ -93,6 +93,7 @@ var (
 	ateapiAddress        = pflag.String("ateapi-address", "k8s:///api.ate-system.svc:443", "ateapi gRPC target used by the credential broker.")
 	ateapiCAFile         = pflag.String("ateapi-ca-file", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "CA bundle used to verify ateapi.")
 	ateapiServerName     = pflag.String("ateapi-server-name", "api.ate-system.svc", "DNS name expected on the ateapi certificate.")
+	certProvider         = pflag.String("cert-provider", certProviderPodCertificate, "Certificate provider for workload certificates and trust bundles: podcertificate or cert-manager.")
 
 	gcpAuthForImagePulls         = pflag.Bool("gcp-auth-for-image-pulls", true, "Use GCP application default credentials mechanism.")
 	localhostRegistryReplacement = pflag.String("localhost-registry-replacement", "", "The replacement registry endpoint for localhost and/or loopback IP addresses, useful for local development. for example kind-registry:5000")
@@ -126,7 +127,10 @@ func main() {
 	if err := serverboot.SetLogLevel(*logLevelFlag); err != nil {
 		serverboot.Fatal(ctx, "Invalid --log-level", err)
 	}
-	slog.InfoContext(ctx, "atelet starting", slog.String("version", version.Version))
+	if *certProvider != certProviderPodCertificate && *certProvider != certProviderCertManager {
+		serverboot.Fatal(ctx, "Invalid --cert-provider", fmt.Errorf("unsupported cert-provider %q (want %q or %q)", *certProvider, certProviderPodCertificate, certProviderCertManager))
+	}
+	slog.InfoContext(ctx, "atelet starting", slog.String("version", version.Version), slog.String("cert_provider", *certProvider))
 
 	// Kept separate from ctx so in-flight work (e.g. a Checkpoint/Restore
 	// streaming a multi-GiB snapshot) is not cancelled the moment SIGTERM
@@ -271,19 +275,39 @@ func main() {
 	ateFactory := externalversions.NewSharedInformerFactory(ateClient, 0)
 	csiDriverConfigLister := ateFactory.Api().V1alpha1().CSIDriverConfigs().Lister()
 
-	clusterTrustBundleInformerFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, 24*time.Hour,
-		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
-			o.FieldSelector = fields.OneTermEqualSelector("metadata.name", supportedTrustBundles[EgressTrustBundleName]).String()
-		}))
-	clusterTrustBundles := clusterTrustBundleInformerFactory.Certificates().V1beta1().ClusterTrustBundles()
-	systemInfoVolumes := newSystemInfoVolumeRefresher(clusterTrustBundles.Lister(), clusterTrustBundles.Informer())
+	var (
+		trustBundleInformerFactory informers.SharedInformerFactory
+		systemInfoVolumes          *systemInfoVolumeRefresher
+	)
+	if *certProvider == certProviderCertManager {
+		trustBundleInformerFactory = informers.NewSharedInformerFactoryWithOptions(k8sClient, 24*time.Hour,
+			informers.WithNamespace(trustBundleConfigNamespace),
+			informers.WithTweakListOptions(func(o *metav1.ListOptions) {
+				o.FieldSelector = fields.OneTermEqualSelector("metadata.name", supportedConfigMapTrustBundles[EgressTrustBundleName]).String()
+			}))
+		trustBundleConfigMaps := trustBundleInformerFactory.Core().V1().ConfigMaps()
+		systemInfoVolumes = newSystemInfoVolumeRefresher(
+			newConfigMapTrustBundleSource(trustBundleConfigMaps.Lister().ConfigMaps(trustBundleConfigNamespace)),
+			trustBundleConfigMaps.Informer(),
+		)
+	} else {
+		trustBundleInformerFactory = informers.NewSharedInformerFactoryWithOptions(k8sClient, 24*time.Hour,
+			informers.WithTweakListOptions(func(o *metav1.ListOptions) {
+				o.FieldSelector = fields.OneTermEqualSelector("metadata.name", supportedClusterTrustBundles[EgressTrustBundleName]).String()
+			}))
+		clusterTrustBundles := trustBundleInformerFactory.Certificates().V1beta1().ClusterTrustBundles()
+		systemInfoVolumes = newSystemInfoVolumeRefresher(
+			newClusterTrustBundleSource(clusterTrustBundles.Lister()),
+			clusterTrustBundles.Informer(),
+		)
+	}
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	ateFactory.Start(stopCh)
-	clusterTrustBundleInformerFactory.Start(stopCh)
+	trustBundleInformerFactory.Start(stopCh)
 	ateFactory.WaitForCacheSync(stopCh)
-	clusterTrustBundleInformerFactory.WaitForCacheSync(stopCh)
+	trustBundleInformerFactory.WaitForCacheSync(stopCh)
 
 	wmService := NewService(
 		ctx,

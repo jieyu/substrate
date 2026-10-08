@@ -23,6 +23,7 @@ import (
 	"encoding/asn1"
 	"encoding/json"
 	"math/big"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -111,6 +112,26 @@ func TestPodIdentityFromCertificate(t *testing.T) {
 				return mintCert(t, template)
 			},
 			want: &fullPodIdentity,
+		},
+		{
+			name: "CSICertificate",
+			cert: func(t *testing.T) *x509.Certificate {
+				spiffeURI, err := url.Parse("spiffe://cluster.local/ns/ate-system/sa/atelet")
+				if err != nil {
+					t.Fatalf("url.Parse: %v", err)
+				}
+				return mintCert(t, &x509.Certificate{
+					Subject:  pkix.Name{CommonName: "pod-uid-csi"},
+					DNSNames: []string{"atelet-xyz.ate-system.pod.cluster.local"},
+					URIs:     []*url.URL{spiffeURI},
+				})
+			},
+			want: &PodIdentity{
+				Namespace:          "ate-system",
+				ServiceAccountName: "atelet",
+				PodName:            "atelet-xyz",
+				PodUID:             "pod-uid-csi",
+			},
 		},
 		{
 			name: "Absent",

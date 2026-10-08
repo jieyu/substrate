@@ -29,10 +29,17 @@ const installDir = "manifests/ate-install"
 
 // SystemOverlay picks the manifest source for a full control plane install.
 //
-// The choice is a product of two switches: kind vs GKE, and the atenet router dataplane.
-// An empty return means "no overlay": apply the base manifests/ate-install
-// directory directly, which is what a plain GKE envoy install does.
+// The choice is a product of Kind vs GKE, the certificate provider, and the
+// atenet router dataplane. An empty return means "no overlay": apply the base
+// manifests/ate-install directory directly, which is what a plain GKE envoy
+// install with podcertificate does.
 func SystemOverlay(cfg *config.Config) string {
+	if cfg.CertProvider == config.CertProviderCertManager {
+		if cfg.Kind {
+			return installDir + "/kind-cert-manager"
+		}
+		return installDir + "/cert-manager"
+	}
 	switch {
 	case cfg.Router == config.RouterAgentgateway && cfg.Kind:
 		return installDir + "/kind-agentgateway"
@@ -55,8 +62,11 @@ func (e *Env) renderSystemManifests(ctx context.Context) ([]byte, error) {
 }
 
 // renderAtenetRouterManifest produces the atenet router manifest for the
-// selected dataplane.
+// selected dataplane and certificate provider.
 func (e *Env) renderAtenetRouterManifest(ctx context.Context) ([]byte, error) {
+	if e.Cfg.CertProvider == config.CertProviderCertManager {
+		return e.KustomizeResolve(ctx, installDir+"/cert-manager-router")
+	}
 	if e.Cfg.Router == config.RouterAgentgateway {
 		return e.KustomizeResolve(ctx, installDir+"/agentgateway-router")
 	}
@@ -84,6 +94,14 @@ func (e *Env) renderAtenetEgressManifest(ctx context.Context) ([]byte, error) {
 			return nil, fmt.Errorf("--experimental-egress-credential-injection requires --atenet-dataplane=envoy")
 		}
 		return e.KustomizeResolve(ctx, installDir+"/agentgateway-egress")
+	}
+
+	if e.Cfg.CertProvider == config.CertProviderCertManager {
+		overlay := installDir + "/cert-manager-egress"
+		if e.Cfg.ExperimentalUseSDSMint {
+			overlay = installDir + "/cert-manager-egress-mitm"
+		}
+		return e.KustomizeResolve(ctx, overlay)
 	}
 
 	if !general && !injection {

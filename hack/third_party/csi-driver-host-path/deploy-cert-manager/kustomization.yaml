@@ -1,0 +1,74 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../deploy
+
+patches:
+  - target:
+      version: v1
+      kind: ConfigMap
+      name: csi-hostpath-envoy-config
+      namespace: default
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: csi-hostpath-envoy-config
+        namespace: default
+      data:
+        sds-servicedns-cert.yaml: |
+          resources:
+          - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+            name: servicedns_serving_cert
+            tls_certificate:
+              certificate_chain: { filename: /run/servicedns/tls.crt }
+              private_key: { filename: /run/servicedns/tls.key }
+              watched_directory: { path: /run/servicedns }
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: csi-hostpath-socat
+      namespace: default
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: csi-hostpath-socat
+        namespace: default
+      spec:
+        template:
+          spec:
+            volumes:
+            - name: servicedns-certs
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: servicedns-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/dns-names: "csi-hostpath-controller.default.svc,csi-hostpath-controller.default.svc.cluster.local"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+            - name: podidentity-ca
+              projected: null
+              configMap:
+                name: podidentity-trust-bundle

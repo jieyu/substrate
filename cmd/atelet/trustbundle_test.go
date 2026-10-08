@@ -27,8 +27,10 @@ import (
 	"time"
 
 	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -62,48 +64,92 @@ func ctbLister(t *testing.T, bundles ...*certsv1beta1.ClusterTrustBundle) certli
 	return certlisters.NewClusterTrustBundleLister(indexer)
 }
 
-// egressTrustBundleObjectName is the backing ClusterTrustBundle the allowlist
-// maps EgressTrustBundleName to (named by atecontroller's reconciler).
-const egressTrustBundleObjectName = "egress-mitm.ate.dev:mitm:primary-bundle"
+func cmLister(t *testing.T, cms ...*corev1.ConfigMap) corelisters.ConfigMapNamespaceLister {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	for _, cm := range cms {
+		if err := indexer.Add(cm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return corelisters.NewConfigMapLister(indexer).ConfigMaps(trustBundleConfigNamespace)
+}
+
+const (
+	// egressClusterTrustBundleObjectName is the backing ClusterTrustBundle in podcertificate mode.
+	egressClusterTrustBundleObjectName = "egress-mitm.ate.dev:mitm:primary-bundle"
+	// egressConfigMapTrustBundleObjectName is the backing ConfigMap in cert-manager mode.
+	egressConfigMapTrustBundleObjectName = "egress-mitm-trust-bundle"
+)
 
 func TestRawTrustBundle(t *testing.T) {
 	certPEM := testCertPEM(t)
 
-	t.Run("resolves the allowlisted name through the mapped object, unsanitized", func(t *testing.T) {
-		raw := "garbage\n" + string(certPEM)
-		lister := ctbLister(t, &certsv1beta1.ClusterTrustBundle{
-			ObjectMeta: metav1.ObjectMeta{Name: egressTrustBundleObjectName},
-			Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: raw},
-		})
-		objectName, got, err := rawTrustBundle(lister, EgressTrustBundleName)
-		if err != nil {
-			t.Fatalf("rawTrustBundle: %v", err)
-		}
-		if objectName != egressTrustBundleObjectName {
-			t.Errorf("objectName = %q, want %q", objectName, egressTrustBundleObjectName)
-		}
-		if got != raw {
-			t.Errorf("raw = %q, want the backing contents verbatim", got)
-		}
-	})
+	providers := []struct {
+		name           string
+		wantObjectName string
+		sourceWith     func(t *testing.T, objectName, raw string) trustBundleSource
+		emptySource    func(t *testing.T) trustBundleSource
+	}{
+		{
+			name:           certProviderPodCertificate,
+			wantObjectName: egressClusterTrustBundleObjectName,
+			sourceWith: func(t *testing.T, objectName, raw string) trustBundleSource {
+				return newClusterTrustBundleSource(ctbLister(t, &certsv1beta1.ClusterTrustBundle{
+					ObjectMeta: metav1.ObjectMeta{Name: objectName},
+					Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: raw},
+				}))
+			},
+			emptySource: func(t *testing.T) trustBundleSource {
+				return newClusterTrustBundleSource(ctbLister(t))
+			},
+		},
+		{
+			name:           certProviderCertManager,
+			wantObjectName: egressConfigMapTrustBundleObjectName,
+			sourceWith: func(t *testing.T, objectName, raw string) trustBundleSource {
+				return newConfigMapTrustBundleSource(cmLister(t, &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Namespace: trustBundleConfigNamespace, Name: objectName},
+					Data:       map[string]string{trustBundleConfigMapKey: raw},
+				}))
+			},
+			emptySource: func(t *testing.T) trustBundleSource {
+				return newConfigMapTrustBundleSource(cmLister(t))
+			},
+		},
+	}
 
-	t.Run("unsupported bundle name fails naming it and the allowlist", func(t *testing.T) {
-		// The lister has the bundle; the allowlist must still reject it —
-		// supported names are a substrate decision, not a cluster lookup.
-		lister := ctbLister(t, &certsv1beta1.ClusterTrustBundle{
-			ObjectMeta: metav1.ObjectMeta{Name: "my-own-bundle"},
-			Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: string(certPEM)},
-		})
-		_, _, err := rawTrustBundle(lister, "my-own-bundle")
-		if err == nil || !strings.Contains(err.Error(), `"my-own-bundle"`) || !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), EgressTrustBundleName) {
-			t.Errorf("error = %v, want unsupported-name error listing the allowlist", err)
-		}
-	})
+	for _, p := range providers {
+		t.Run(p.name, func(t *testing.T) {
+			t.Run("resolves the allowlisted name through the mapped object, unsanitized", func(t *testing.T) {
+				raw := "garbage\n" + string(certPEM)
+				source := p.sourceWith(t, p.wantObjectName, raw)
+				objectName, got, err := source.raw(EgressTrustBundleName)
+				if err != nil {
+					t.Fatalf("raw: %v", err)
+				}
+				if objectName != p.wantObjectName {
+					t.Errorf("objectName = %q, want %q", objectName, p.wantObjectName)
+				}
+				if got != raw {
+					t.Errorf("raw = %q, want the backing contents verbatim", got)
+				}
+			})
 
-	t.Run("missing bundle fails naming it", func(t *testing.T) {
-		_, _, err := rawTrustBundle(ctbLister(t), EgressTrustBundleName)
-		if err == nil || !strings.Contains(err.Error(), egressTrustBundleObjectName) || !strings.Contains(err.Error(), "not found") {
-			t.Errorf("error = %v, want not-found naming the backing object", err)
-		}
-	})
+			t.Run("unsupported bundle name fails naming it and the allowlist", func(t *testing.T) {
+				source := p.sourceWith(t, "my-own-bundle", string(certPEM))
+				_, _, err := source.raw("my-own-bundle")
+				if err == nil || !strings.Contains(err.Error(), `"my-own-bundle"`) || !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), EgressTrustBundleName) {
+					t.Errorf("error = %v, want unsupported-name error listing the allowlist", err)
+				}
+			})
+
+			t.Run("missing bundle fails naming it", func(t *testing.T) {
+				_, _, err := p.emptySource(t).raw(EgressTrustBundleName)
+				if err == nil || !strings.Contains(err.Error(), p.wantObjectName) || !strings.Contains(err.Error(), "not found") {
+					t.Errorf("error = %v, want not-found naming the backing object", err)
+				}
+			})
+		})
+	}
 }

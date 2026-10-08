@@ -1,0 +1,527 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  # Remove podcertificate-controller resources when present in the base/kind bundle.
+  - target:
+      version: v1
+      kind: Namespace
+      name: podcertificate-controller-system
+    patch: |-
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: podcertificate-controller-system
+      $patch: delete
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRole
+      name: podcert-ate-dev-signer
+    patch: |-
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: podcert-ate-dev-signer
+      $patch: delete
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: ClusterRoleBinding
+      name: podcert-ate-dev-signer
+    patch: |-
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: podcert-ate-dev-signer
+      $patch: delete
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: Role
+      name: coordinator
+      namespace: podcertificate-controller-system
+    patch: |-
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: coordinator
+        namespace: podcertificate-controller-system
+      $patch: delete
+  - target:
+      group: rbac.authorization.k8s.io
+      version: v1
+      kind: RoleBinding
+      name: podcertificate-controller-is-a-coordinator
+      namespace: podcertificate-controller-system
+    patch: |-
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: podcertificate-controller-is-a-coordinator
+        namespace: podcertificate-controller-system
+      $patch: delete
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: podcertificate-controller
+      namespace: podcertificate-controller-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: podcertificate-controller
+        namespace: podcertificate-controller-system
+      $patch: delete
+
+  # ate-api-server: use cert-manager-csi-driver volumes and trust-manager ConfigMaps.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ate-api-server
+      namespace: ate-system
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --pod-identity-ca-certs=/run/podidentity-ca/trust-bundle.pem
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ate-api-server
+      namespace: ate-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ate-api-server
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            containers:
+            - name: ate-api-server
+              volumeMounts:
+              - name: servicedns-ca
+                mountPath: /run/servicedns-ca
+                readOnly: true
+              - name: podidentity-ca
+                mountPath: /run/podidentity-ca
+                readOnly: true
+            volumes:
+            - name: servicedns
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: servicedns-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/dns-names: "api.ate-system.svc,api.ate-system.svc.cluster.local"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+            - name: servicedns-ca
+              configMap:
+                name: servicedns-trust-bundle
+            - name: podidentity
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: podidentity-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/common-name: "${POD_UID}"
+                  csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+                  csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+            - name: podidentity-ca
+              configMap:
+                name: podidentity-trust-bundle
+
+  # ate-controller: set --cert-provider=cert-manager and use CSI + ConfigMap volumes.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ate-controller
+      namespace: ate-system
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --cert-provider=cert-manager
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ate-controller
+      namespace: ate-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ate-controller
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            volumes:
+            - name: podidentity
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: podidentity-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/common-name: "${POD_UID}"
+                  csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+                  csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+            - name: servicedns-ca
+              projected: null
+              configMap:
+                name: servicedns-trust-bundle
+
+  # atelet: set --cert-provider=cert-manager, --client-ca-certs, and CSI + ConfigMap volumes.
+  - target:
+      group: apps
+      version: v1
+      kind: DaemonSet
+      namespace: ate-system
+      labelSelector: app=atelet
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --cert-provider=cert-manager
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --client-ca-certs=/run/podidentity-ca/trust-bundle.pem
+  - target:
+      group: apps
+      version: v1
+      kind: DaemonSet
+      namespace: ate-system
+      labelSelector: app=atelet
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: atelet-${SUBSTRATE_VERSION_SUFFIX}
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            containers:
+            - name: atelet
+              volumeMounts:
+              - name: podidentity-ca
+                mountPath: /run/podidentity-ca
+                readOnly: true
+            volumes:
+            - name: podidentity
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: podidentity-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/common-name: "${POD_UID}"
+                  csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+                  csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+            - name: podidentity-ca
+              configMap:
+                name: podidentity-trust-bundle
+            - name: servicedns-ca
+              projected: null
+              configMap:
+                name: servicedns-trust-bundle
+
+  # atenet-router (Envoy): point SDS at tls.crt/tls.key and mount CSI + ConfigMap volumes.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: atenet-router
+      namespace: ate-system
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --envoy-cert-path=/run/servicedns.podcert.ate.dev/tls.crt
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --upstream-credential-bundle=/run/podidentity.podcert.ate.dev/tls.crt
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --upstream-trust-bundle=/run/podidentity-ca/trust-bundle.pem
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: atenet-router
+      namespace: ate-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: atenet-router
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            securityContext:
+              fsGroup: 101
+            containers:
+            - name: envoy
+              volumeMounts:
+              - name: podidentity-ca
+                mountPath: /run/podidentity-ca
+                readOnly: true
+            volumes:
+            - name: servicedns
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: servicedns-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/dns-names: "atenet-router.ate-system.svc,atenet-router.ate-system.svc.cluster.local"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+                  csi.cert-manager.io/fs-group: "101"
+            - name: podidentity
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: podidentity-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/common-name: "${POD_UID}"
+                  csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+                  csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+                  csi.cert-manager.io/fs-group: "101"
+            - name: podidentity-ca
+              configMap:
+                name: podidentity-trust-bundle
+            - name: servicedns-ca
+              projected: null
+              configMap:
+                name: servicedns-trust-bundle
+
+  # atenet-egress: point Envoy SDS configs at tls.crt/tls.key and mount CSI + ConfigMap volumes.
+  - target:
+      version: v1
+      kind: ConfigMap
+      name: atenet-egress
+      namespace: ate-system
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: atenet-egress
+        namespace: ate-system
+      data:
+        sds-servicedns-cert.yaml: |
+          resources:
+          - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+            name: servicedns_serving_cert
+            tls_certificate:
+              certificate_chain: { filename: /run/servicedns.podcert.ate.dev/tls.crt }
+              private_key: { filename: /run/servicedns.podcert.ate.dev/tls.key }
+              watched_directory: { path: /run/servicedns.podcert.ate.dev }
+        sds-podidentity-cert.yaml: |
+          resources:
+          - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+            name: podidentity_client_cert
+            tls_certificate:
+              certificate_chain: { filename: /run/podidentity.podcert.ate.dev/tls.crt }
+              private_key: { filename: /run/podidentity.podcert.ate.dev/tls.key }
+              watched_directory: { path: /run/podidentity.podcert.ate.dev }
+        sds-servicedns-validation.yaml: |
+          resources:
+          - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+            name: servicedns_validation_context
+            validation_context:
+              trusted_ca: { filename: /run/servicedns-ca/trust-bundle.pem }
+              watched_directory: { path: /run/servicedns-ca }
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: atenet-egress
+      namespace: ate-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: atenet-egress
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            securityContext:
+              fsGroup: 65532
+            containers:
+            - name: envoy
+              volumeMounts:
+              - name: servicedns-ca
+                mountPath: /run/servicedns-ca
+                readOnly: true
+              - name: podidentity-ca
+                mountPath: /run/podidentity-ca
+                readOnly: true
+            - name: ext-proc
+              volumeMounts:
+              - name: servicedns-ca
+                mountPath: /run/servicedns.podcert.ate.dev
+                readOnly: true
+              - name: servicedns-ca
+                mountPath: /run/servicedns-ca
+                readOnly: true
+            volumes:
+            - name: servicedns
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: servicedns-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/dns-names: "atenet-egress.ate-system.svc,atenet-egress.ate-system.svc.cluster.local"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+                  csi.cert-manager.io/fs-group: "65532"
+            - name: servicedns-ca
+              configMap:
+                name: servicedns-trust-bundle
+            - name: podidentity
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: podidentity-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/common-name: "${POD_UID}"
+                  csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+                  csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+                  csi.cert-manager.io/fs-group: "65532"
+            - name: podidentity-ca
+              configMap:
+                name: podidentity-trust-bundle
+
+  # postgres: point postgresql.conf and reload-tls.sh at tls.crt + tls.key, and use CSI + ConfigMap volumes.
+  - target:
+      version: v1
+      kind: ConfigMap
+      name: postgres-config
+      namespace: ate-system
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: postgres-config
+        namespace: ate-system
+      data:
+        postgresql.conf: |
+          listen_addresses = '*'
+          ssl = on
+          ssl_cert_file = '/run/servicedns.podcert.ate.dev/tls.crt'
+          ssl_key_file = '/run/servicedns.podcert.ate.dev/tls.key'
+          ssl_ca_file = '/run/podidentity.podcert.ate.dev/trust-bundle.pem'
+          hba_file = '/etc/postgresql/pg_hba.conf'
+        reload-tls.sh: |
+          set -eu
+          trap 'exit 0' TERM INT
+          CERT=/run/servicedns.podcert.ate.dev/tls.crt
+          KEY=/run/servicedns.podcert.ate.dev/tls.key
+          CA=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+          INTERVAL=60
+          reloaded=""
+          while true; do
+            current="$(sha256sum "${CERT}" "${KEY}" "${CA}")"
+            if [ "${current}" != "${reloaded}" ]; then
+              if pg_isready -q && psql -U postgres -d atepg -c "SELECT pg_reload_conf();" >/dev/null; then
+                reloaded="${current}"
+              fi
+            fi
+            sleep "${INTERVAL}" &
+            wait $!
+          done
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: postgres
+      namespace: ate-system
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: postgres
+        namespace: ate-system
+      spec:
+        template:
+          spec:
+            volumes:
+            - name: servicedns
+              projected: null
+              csi:
+                driver: csi.cert-manager.io
+                readOnly: true
+                volumeAttributes:
+                  csi.cert-manager.io/issuer-name: servicedns-issuer
+                  csi.cert-manager.io/issuer-kind: ClusterIssuer
+                  csi.cert-manager.io/dns-names: "postgres.ate-system.svc,postgres.ate-system.svc.cluster.local"
+                  csi.cert-manager.io/key-encoding: PKCS8
+                  csi.cert-manager.io/key-algorithm: ECDSA
+                  csi.cert-manager.io/key-size: "256"
+                  csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+                  csi.cert-manager.io/fs-group: "70"
+            - name: podidentity-ca
+              projected: null
+              configMap:
+                name: podidentity-trust-bundle

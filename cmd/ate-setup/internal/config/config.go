@@ -36,6 +36,9 @@ const (
 	RouterEnvoy        = "envoy"
 	RouterAgentgateway = "agentgateway"
 
+	CertProviderPodCertificate = "podcertificate"
+	CertProviderCertManager    = "cert-manager"
+
 	SandboxClassGvisor  = "gvisor"
 	SandboxClassMicrovm = "microvm"
 )
@@ -45,9 +48,14 @@ const DefaultRolloutTimeout = 60 * time.Second
 
 // DefaultPostgresConnectionString mirrors default_postgres_connection_string in
 // the shell installer: the apiserver reaches PostgreSQL over mTLS using the
-// podcertificate controller's projected servicedns trust bundle and its own
-// podidentity credential bundle.
+// servicedns trust bundle and its own podidentity credential bundle.
 const DefaultPostgresConnectionString = "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns.podcert.ate.dev/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/credential-bundle.pem&sslkey=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+
+// CertManagerPostgresConnectionString is the default PostgreSQL connection
+// string when --cert-provider=cert-manager: trust-manager publishes the
+// servicedns trust bundle to a ConfigMap mounted at /run/servicedns-ca, and
+// cert-manager-csi-driver mounts tls.crt and tls.key.
+const CertManagerPostgresConnectionString = "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns-ca/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/tls.crt&sslkey=/run/podidentity.podcert.ate.dev/tls.key"
 
 // DefaultPostgresSchema mirrors the shell installer's default for
 // ATE_API_POSTGRES_SCHEMA, the PostgreSQL schema holding the Substrate tables.
@@ -97,8 +105,10 @@ type Config struct {
 
 	// Router selects the atenet router dataplane.
 	Router string
+	// CertProvider selects the certificate provider: podcertificate or cert-manager.
+	CertProvider string
 	// PostgresConnectionString is the apiserver's store connection string.
-	// Empty means use DefaultPostgresConnectionString.
+	// Empty means use DefaultPostgresConnectionString (or CertManagerPostgresConnectionString).
 	PostgresConnectionString string
 	// PostgresSchema is the PostgreSQL schema for the Substrate tables
 	// (ATE_API_POSTGRES_SCHEMA). Empty means DefaultPostgresSchema.
@@ -149,6 +159,7 @@ type Options struct {
 	Kubeconfig                            string
 	Context                               string
 	Router                                string
+	CertProvider                          string
 	RolloutTimeout                        string
 	PodcertWorkersPerSigner               int
 	ExperimentalUseSDSMint                bool
@@ -252,6 +263,7 @@ func Load(opts Options) (*Config, error) {
 	}
 
 	cfg.Router = firstNonEmpty(opts.Router, env["ATE_ATENET_DATAPLANE"], RouterEnvoy)
+	cfg.CertProvider = firstNonEmpty(opts.CertProvider, env["ATE_CERT_PROVIDER"], CertProviderPodCertificate)
 
 	if err := validate(cfg); err != nil {
 		return nil, err
@@ -285,6 +297,14 @@ func validate(cfg *Config) error {
 	case RouterEnvoy, RouterAgentgateway:
 	default:
 		return fmt.Errorf("atenet router must be %s or %s, got %q", RouterEnvoy, RouterAgentgateway, cfg.Router)
+	}
+	switch cfg.CertProvider {
+	case CertProviderPodCertificate, CertProviderCertManager:
+	default:
+		return fmt.Errorf("cert provider must be %s or %s, got %q", CertProviderPodCertificate, CertProviderCertManager, cfg.CertProvider)
+	}
+	if cfg.CertProvider == CertProviderCertManager && cfg.Router == RouterAgentgateway {
+		return fmt.Errorf("--cert-provider=cert-manager requires --atenet-dataplane=envoy")
 	}
 	if cfg.PodcertWorkersPerSigner < 0 {
 		return fmt.Errorf("--podcert-workers-per-signer must be a positive integer, got %d", cfg.PodcertWorkersPerSigner)
@@ -334,10 +354,13 @@ func validateExtprocService(spec string) error {
 }
 
 // PostgresConnString returns the configured connection string, falling back to
-// the in-cluster default.
+// the in-cluster default for the selected certificate provider.
 func (c *Config) PostgresConnString() string {
 	if c.PostgresConnectionString != "" {
 		return c.PostgresConnectionString
+	}
+	if c.CertProvider == CertProviderCertManager {
+		return CertManagerPostgresConnectionString
 	}
 	return DefaultPostgresConnectionString
 }
@@ -420,6 +443,7 @@ func (c *Config) ScriptEnv() []string {
 		"PROJECT_ID":          c.ProjectID,
 		"CLUSTER_NAME":        c.ClusterName,
 		"CLUSTER_LOCATION":    c.ClusterLocation,
+		"ATE_CERT_PROVIDER":   c.CertProvider,
 	} {
 		if value == "" {
 			// An empty value means "not configured". Leaving the variable set

@@ -65,18 +65,26 @@ type ateomOTelSettings struct {
 }
 
 const (
-	atunnelIdentityVolume       = "atunnel-identity"
-	atunnelIdentityMountPath    = "/run/podidentity.podcert.ate.dev"
-	atunnelEgressTrustVolume    = "atunnel-egress-trust"
-	atunnelEgressTrustMountPath = "/run/servicedns.podcert.ate.dev"
-	ateomCapacityVolume         = "ateom-capacity"
+	atunnelIdentityVolume         = "atunnel-identity"
+	atunnelIdentityMountPath      = "/run/podidentity.podcert.ate.dev"
+	atunnelIdentityTrustVolume    = "atunnel-identity-trust"
+	atunnelIdentityTrustMountPath = "/run/podidentity-ca"
+	atunnelEgressTrustVolume      = "atunnel-egress-trust"
+	atunnelEgressTrustMountPath   = "/run/servicedns.podcert.ate.dev"
+	ateomCapacityVolume           = "ateom-capacity"
 )
 
 // buildDeploymentApplyConfig constructs the SSA apply configuration for the
 // Deployment managed by a WorkerPool. Only fields owned by this controller
 // are declared here. otel, when it carries an endpoint, is propagated to the
 // ateom container so it pushes telemetry to that collector.
-func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettings) *appsv1ac.DeploymentApplyConfiguration {
+func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettings, certProviders ...CertProvider) *appsv1ac.DeploymentApplyConfiguration {
+	var certProvider CertProvider
+	if len(certProviders) > 0 {
+		certProvider = certProviders[0]
+	}
+	certProvider = effectiveCertProvider(certProvider)
+
 	labels := map[string]string{}
 	annotations := map[string]string{}
 	if wp.Spec.Template != nil {
@@ -89,6 +97,42 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 	}
 	labels["ate.dev/worker-pool"] = wp.Name
 
+	credBundleArg := "--atunnel-credential-bundle=" + atunnelIdentityMountPath + "/credential-bundle.pem"
+	trustBundleArg := "--atunnel-trust-bundle=" + atunnelIdentityMountPath + "/trust-bundle.pem"
+	if certProvider == CertProviderCertManager {
+		credBundleArg = "--atunnel-credential-bundle=" + atunnelIdentityMountPath + "/tls.crt"
+		trustBundleArg = "--atunnel-trust-bundle=" + atunnelIdentityTrustMountPath + "/trust-bundle.pem"
+	}
+
+	volumeMounts := []*corev1ac.VolumeMountApplyConfiguration{
+		corev1ac.VolumeMount().
+			WithName(ateomCapacityVolume).
+			WithMountPath(ateomcapacity.CapacityMountPath).
+			WithReadOnly(true),
+		corev1ac.VolumeMount().
+			WithName("run-ateom").
+			WithMountPath(ateompath.BasePath).
+			WithMountPropagation(corev1.MountPropagationHostToContainer),
+		corev1ac.VolumeMount().
+			WithName(atunnelIdentityVolume).
+			WithMountPath(atunnelIdentityMountPath).
+			WithReadOnly(true),
+	}
+	if certProvider == CertProviderCertManager {
+		volumeMounts = append(volumeMounts,
+			corev1ac.VolumeMount().
+				WithName(atunnelIdentityTrustVolume).
+				WithMountPath(atunnelIdentityTrustMountPath).
+				WithReadOnly(true),
+		)
+	}
+	volumeMounts = append(volumeMounts,
+		corev1ac.VolumeMount().
+			WithName(atunnelEgressTrustVolume).
+			WithMountPath(atunnelEgressTrustMountPath).
+			WithReadOnly(true),
+	)
+
 	containerAC := corev1ac.Container().
 		WithName("ateom").
 		WithImage(wp.Spec.WorkerImage).
@@ -96,8 +140,8 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 			"--pod-uid=$(POD_UID)",
 			"--atunnel-listen-address=:443",
 			"--atunnel-connect-listen-address=:8443",
-			"--atunnel-credential-bundle="+atunnelIdentityMountPath+"/credential-bundle.pem",
-			"--atunnel-trust-bundle="+atunnelIdentityMountPath+"/trust-bundle.pem",
+			credBundleArg,
+			trustBundleArg,
 			"--atunnel-egress-listen-address=0.0.0.0:15001",
 			"--atunnel-egress-trust-bundle="+atunnelEgressTrustMountPath+"/trust-bundle.pem",
 		).
@@ -119,42 +163,51 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 				WithPort(intstr.FromString("readyz")))).
 		WithSecurityContext(ateomSecurityContext(wp.Spec.SandboxClass)).
 		WithEnv(ateomContainerEnv(otel)...).
-		WithVolumeMounts(
-			corev1ac.VolumeMount().
-				WithName(ateomCapacityVolume).
-				WithMountPath(ateomcapacity.CapacityMountPath).
-				WithReadOnly(true),
-			corev1ac.VolumeMount().
-				WithName("run-ateom").
-				WithMountPath(ateompath.BasePath).
-				WithMountPropagation(corev1.MountPropagationHostToContainer),
-			corev1ac.VolumeMount().
-				WithName(atunnelIdentityVolume).
-				WithMountPath(atunnelIdentityMountPath).
-				WithReadOnly(true),
-			corev1ac.VolumeMount().
-				WithName(atunnelEgressTrustVolume).
-				WithMountPath(atunnelEgressTrustMountPath).
-				WithReadOnly(true),
-		)
+		WithVolumeMounts(volumeMounts...)
 
-	podSpecAC := corev1ac.PodSpec().
-		WithSecurityContext(corev1ac.PodSecurityContext().
-			WithRunAsUser(0).
-			WithRunAsGroup(0)).
-		WithVolumes(
+	volumes := []*corev1ac.VolumeApplyConfiguration{
+		corev1ac.Volume().
+			WithName(ateomCapacityVolume).
+			WithDownwardAPI(corev1ac.DownwardAPIVolumeSource().
+				WithItems(
+					resourceFieldRefFile(ateomcapacity.CPULimitFile, "limits.cpu", milliCores),
+					resourceFieldRefFile(ateomcapacity.MemoryLimitFile, "limits.memory", wholeBytes),
+				)),
+		corev1ac.Volume().
+			WithName("run-ateom").
+			WithHostPath(corev1ac.HostPathVolumeSource().
+				WithPath(ateompath.BasePath).
+				WithType(corev1.HostPathDirectoryOrCreate)),
+	}
+	if certProvider == CertProviderCertManager {
+		volumes = append(volumes,
 			corev1ac.Volume().
-				WithName(ateomCapacityVolume).
-				WithDownwardAPI(corev1ac.DownwardAPIVolumeSource().
-					WithItems(
-						resourceFieldRefFile(ateomcapacity.CPULimitFile, "limits.cpu", milliCores),
-						resourceFieldRefFile(ateomcapacity.MemoryLimitFile, "limits.memory", wholeBytes),
-					)),
+				WithName(atunnelIdentityVolume).
+				WithCSI(corev1ac.CSIVolumeSource().
+					WithDriver("csi.cert-manager.io").
+					WithReadOnly(true).
+					WithVolumeAttributes(map[string]string{
+						"csi.cert-manager.io/issuer-name":   "podidentity-issuer",
+						"csi.cert-manager.io/issuer-kind":   "ClusterIssuer",
+						"csi.cert-manager.io/common-name":   "${POD_UID}",
+						"csi.cert-manager.io/dns-names":     "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local",
+						"csi.cert-manager.io/uri-sans":      "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}",
+						"csi.cert-manager.io/key-algorithm": "ECDSA",
+						"csi.cert-manager.io/key-size":      "256",
+						"csi.cert-manager.io/key-encoding":  "PKCS8",
+						"csi.cert-manager.io/key-usages":    "digital signature,key encipherment,server auth,client auth",
+					})),
 			corev1ac.Volume().
-				WithName("run-ateom").
-				WithHostPath(corev1ac.HostPathVolumeSource().
-					WithPath(ateompath.BasePath).
-					WithType(corev1.HostPathDirectoryOrCreate)),
+				WithName(atunnelIdentityTrustVolume).
+				WithConfigMap(corev1ac.ConfigMapVolumeSource().
+					WithName("podidentity-trust-bundle")),
+			corev1ac.Volume().
+				WithName(atunnelEgressTrustVolume).
+				WithConfigMap(corev1ac.ConfigMapVolumeSource().
+					WithName("servicedns-trust-bundle")),
+		)
+	} else {
+		volumes = append(volumes,
 			corev1ac.Volume().
 				WithName(atunnelIdentityVolume).
 				WithProjected(corev1ac.ProjectedVolumeSource().
@@ -185,6 +238,13 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 					),
 				),
 		)
+	}
+
+	podSpecAC := corev1ac.PodSpec().
+		WithSecurityContext(corev1ac.PodSecurityContext().
+			WithRunAsUser(0).
+			WithRunAsGroup(0)).
+		WithVolumes(volumes...)
 
 	applyWorkerPoolPodTemplate(podSpecAC, containerAC, wp.Spec.Template)
 	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.SandboxClass)

@@ -76,6 +76,8 @@ var (
 	ateapiCAFile     = pflag.String("ateapi-ca-file", ateapiauth.DefaultServiceAccountCAFile, "PEM file with CAs trusted to verify the ateapi server cert.")
 	ateapiServerName = pflag.String("ateapi-server-name", "", "SNI / hostname expected on the ateapi server cert. Optional.")
 	ateapiClientCert = pflag.String("ateapi-client-cert", "", "Credential bundle presented as the client certificate when dialing ateapi. Required.")
+
+	certProviderFlag = pflag.String("cert-provider", string(controllers.CertProviderPodCertificate), "Certificate provider for workload certificates and trust bundles: podcertificate or cert-manager.")
 )
 
 func init() {
@@ -102,7 +104,11 @@ func main() {
 	if err := serverboot.SetLogLevel(*logLevelFlag); err != nil {
 		serverboot.Fatal(ctx, "Invalid --log-level", err)
 	}
-	slog.InfoContext(ctx, "atecontroller starting", slog.String("version", version.Version))
+	certProvider := controllers.CertProvider(*certProviderFlag)
+	if !controllers.ValidCertProvider(certProvider) {
+		serverboot.Fatal(ctx, "Invalid --cert-provider", fmt.Errorf("unsupported cert-provider %q (want %q or %q)", *certProviderFlag, controllers.CertProviderPodCertificate, controllers.CertProviderCertManager))
+	}
+	slog.InfoContext(ctx, "atecontroller starting", slog.String("version", version.Version), slog.String("cert_provider", string(certProvider)))
 	ctrl.SetLogger(newControllerRuntimeLogger(slog.Default().Handler()))
 
 	// Both providers must be registered before the ateapi client below:
@@ -183,6 +189,7 @@ func main() {
 	if err = (&controllers.WorkerPoolReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
+		CertProvider:             certProvider,
 		OTelEndpoint:             *otelEndpoint,
 		OTelMetricExportInterval: *otelMetricExportInterval,
 		OTelMetricExportTimeout:  *otelMetricExportTimeout,
@@ -202,7 +209,8 @@ func main() {
 	}
 
 	if err = (&controllers.EgressMITMTrustReconciler{
-		Client: mgr.GetClient(),
+		Client:       mgr.GetClient(),
+		CertProvider: certProvider,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "EgressMITMTrust")
 		os.Exit(1)

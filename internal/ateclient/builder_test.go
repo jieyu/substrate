@@ -30,6 +30,7 @@ import (
 	"time"
 
 	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -131,7 +132,19 @@ func trustBundle(name, signer string, live bool, pemData []byte) *certsv1beta1.C
 	return ctb
 }
 
-func TestServerTLSConfig(t *testing.T) {
+func trustBundleConfigMap(name string, pemData []byte) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: serviceDNSTrustBundleNamespace,
+			Name:      name,
+		},
+		Data: map[string]string{
+			serviceDNSTrustBundleKey: string(pemData),
+		},
+	}
+}
+
+func TestServerTLSConfigClusterTrustBundle(t *testing.T) {
 	servicednsCA1 := testCAPEM(t, "servicedns-ca-1")
 	servicednsCA2 := testCAPEM(t, "servicedns-ca-2")
 	podidentityCA := testCAPEM(t, "podidentity-ca")
@@ -168,6 +181,40 @@ func TestServerTLSConfig(t *testing.T) {
 	}
 }
 
+func TestServerTLSConfigConfigMap(t *testing.T) {
+	servicednsCA1 := testCAPEM(t, "servicedns-ca-1")
+	servicednsCA2 := testCAPEM(t, "servicedns-ca-2")
+	podidentityCA := testCAPEM(t, "podidentity-ca")
+
+	clientset := fake.NewSimpleClientset(
+		trustBundleConfigMap(serviceDNSTrustBundleConfigMap, append(servicednsCA1, servicednsCA2...)),
+		trustBundleConfigMap("podidentity-trust-bundle", podidentityCA),
+	)
+
+	cfg, err := serverTLSConfig(context.Background(), clientset)
+	if err != nil {
+		t.Fatalf("serverTLSConfig: %v", err)
+	}
+
+	if got, want := cfg.ServerName, "api.ate-system.svc"; got != want {
+		t.Errorf("ServerName=%q want %q", got, want)
+	}
+	if cfg.MinVersion < tls.VersionTLS13 {
+		t.Errorf("MinVersion=%x want at least %x", cfg.MinVersion, tls.VersionTLS13)
+	}
+	if cfg.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify=true, want false")
+	}
+
+	// The pool must contain exactly the servicedns CAs: not the podidentity bundle.
+	wantPool := x509.NewCertPool()
+	wantPool.AppendCertsFromPEM(servicednsCA1)
+	wantPool.AppendCertsFromPEM(servicednsCA2)
+	if !cfg.RootCAs.Equal(wantPool) {
+		t.Error("RootCAs does not match the servicedns trust bundle")
+	}
+}
+
 func TestServerTLSConfigErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -175,15 +222,27 @@ func TestServerTLSConfigErrors(t *testing.T) {
 	}{
 		{name: "no bundles"},
 		{
-			name: "only other signers",
+			name: "only other signers in ClusterTrustBundle",
 			objects: []runtime.Object{
 				trustBundle("podidentity.podcert.ate.dev:identity:primary-bundle", "podidentity.podcert.ate.dev/identity", true, testCAPEM(t, "podidentity-ca")),
 			},
 		},
 		{
-			name: "bundle with no valid certificates",
+			name: "only other ConfigMap bundles",
+			objects: []runtime.Object{
+				trustBundleConfigMap("podidentity-trust-bundle", testCAPEM(t, "podidentity-ca")),
+			},
+		},
+		{
+			name: "ClusterTrustBundle with no valid certificates",
 			objects: []runtime.Object{
 				trustBundle("servicedns.podcert.ate.dev:identity:primary-bundle", serviceDNSSignerName, true, []byte("not a pem")),
+			},
+		},
+		{
+			name: "ConfigMap bundle with no valid certificates",
+			objects: []runtime.Object{
+				trustBundleConfigMap(serviceDNSTrustBundleConfigMap, []byte("not a pem")),
 			},
 		},
 	} {

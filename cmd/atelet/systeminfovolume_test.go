@@ -29,8 +29,10 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -38,18 +40,18 @@ import (
 // ClusterTrustBundle the way a watch event would.
 type ctbStore struct {
 	indexer cache.Indexer
-	lister  certlisters.ClusterTrustBundleLister
+	lister  trustBundleSource
 }
 
 func newCTBStore(t *testing.T) *ctbStore {
 	t.Helper()
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	return &ctbStore{indexer: indexer, lister: certlisters.NewClusterTrustBundleLister(indexer)}
+	return &ctbStore{indexer: indexer, lister: newClusterTrustBundleSource(certlisters.NewClusterTrustBundleLister(indexer))}
 }
 
 func (s *ctbStore) object(raw string) *certsv1beta1.ClusterTrustBundle {
 	return &certsv1beta1.ClusterTrustBundle{
-		ObjectMeta: metav1.ObjectMeta{Name: egressTrustBundleObjectName},
+		ObjectMeta: metav1.ObjectMeta{Name: egressClusterTrustBundleObjectName},
 		Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: raw},
 	}
 }
@@ -68,6 +70,33 @@ func (s *ctbStore) remove(t *testing.T) {
 	if err := s.indexer.Delete(s.object("")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type cmStore struct {
+	indexer cache.Indexer
+	lister  trustBundleSource
+}
+
+func newCMStore(t *testing.T) *cmStore {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	return &cmStore{indexer: indexer, lister: newConfigMapTrustBundleSource(corelisters.NewConfigMapLister(indexer).ConfigMaps(trustBundleConfigNamespace))}
+}
+
+func (s *cmStore) object(raw string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: trustBundleConfigNamespace, Name: egressConfigMapTrustBundleObjectName},
+		Data:       map[string]string{trustBundleConfigMapKey: raw},
+	}
+}
+
+func (s *cmStore) set(t *testing.T, raw string) *corev1.ConfigMap {
+	t.Helper()
+	obj := s.object(raw)
+	if err := s.indexer.Add(obj); err != nil {
+		t.Fatal(err)
+	}
+	return obj
 }
 
 func trustVolumeSpec(relPath string) *ateletpb.SystemInfoVolume {
@@ -660,31 +689,64 @@ func TestSystemInfoVolumeRegister_TrustBundle(t *testing.T) {
 	// Junk around the certificate proves kubelet-style sanitization: only the
 	// CERTIFICATE block survives, and the duplicate is dropped.
 	junk := "garbage\n" + string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte("x")}))
-	store := newCTBStore(t)
-	store.set(t, junk+string(certPEM)+string(certPEM))
-	dir := t.TempDir()
-	registerTrustVolume(t, newSystemInfoVolumeRefresher(store.lister, nil), dir, "uid-1")
-	if got := readProjected(t, dir, "uid-1", "trust", "ca.pem"); got != string(certPEM) {
-		t.Errorf("content = %q, want the sanitized bundle", got)
+
+	providers := []struct {
+		name        string
+		sourceWith  func(t *testing.T, raw string) trustBundleSource
+		emptySource func(t *testing.T) trustBundleSource
+	}{
+		{
+			name: certProviderPodCertificate,
+			sourceWith: func(t *testing.T, raw string) trustBundleSource {
+				store := newCTBStore(t)
+				store.set(t, raw)
+				return store.lister
+			},
+			emptySource: func(t *testing.T) trustBundleSource {
+				return newClusterTrustBundleSource(ctbLister(t))
+			},
+		},
+		{
+			name: certProviderCertManager,
+			sourceWith: func(t *testing.T, raw string) trustBundleSource {
+				store := newCMStore(t)
+				store.set(t, raw)
+				return store.lister
+			},
+			emptySource: func(t *testing.T) trustBundleSource {
+				return newConfigMapTrustBundleSource(cmLister(t))
+			},
+		},
 	}
 
-	t.Run("resolution failure fails the start rather than produce an empty trust file", func(t *testing.T) {
-		r := newSystemInfoVolumeRefresher(ctbLister(t), nil)
-		vol := &systemInfoVolume{Name: "trust", Root: filepath.Join(t.TempDir(), "trust"), Spec: trustVolumeSpec("ca.pem")}
-		err := r.Register("uid-2", resources.ActorRef{Atespace: "team-a", Name: "actor-2"}, []*systemInfoVolume{vol})
-		if err == nil || !strings.Contains(err.Error(), "not found") || !strings.Contains(err.Error(), `"trust"`) {
-			t.Errorf("Register = %v, want not-found error naming the volume", err)
-		}
-	})
+	for _, p := range providers {
+		t.Run(p.name, func(t *testing.T) {
+			source := p.sourceWith(t, junk+string(certPEM)+string(certPEM))
+			dir := t.TempDir()
+			registerTrustVolume(t, newSystemInfoVolumeRefresher(source, nil), dir, "uid-1")
+			if got := readProjected(t, dir, "uid-1", "trust", "ca.pem"); got != string(certPEM) {
+				t.Errorf("content = %q, want the sanitized bundle", got)
+			}
 
-	t.Run("re-registration supersedes stale entry without panicking", func(t *testing.T) {
-		r := newSystemInfoVolumeRefresher(store.lister, nil)
-		dir1 := t.TempDir()
-		dir2 := t.TempDir()
-		registerTrustVolume(t, r, dir1, "uid-rereg")
-		registerTrustVolume(t, r, dir2, "uid-rereg")
-		if got := readProjected(t, dir2, "uid-rereg", "trust", "ca.pem"); got != string(certPEM) {
-			t.Errorf("content = %q, want the sanitized bundle", got)
-		}
-	})
+			t.Run("resolution failure fails the start rather than produce an empty trust file", func(t *testing.T) {
+				r := newSystemInfoVolumeRefresher(p.emptySource(t), nil)
+				vol := &systemInfoVolume{Name: "trust", Root: filepath.Join(t.TempDir(), "trust"), Spec: trustVolumeSpec("ca.pem")}
+				err := r.Register("uid-2", resources.ActorRef{Atespace: "team-a", Name: "actor-2"}, []*systemInfoVolume{vol})
+				if err == nil || !strings.Contains(err.Error(), "not found") || !strings.Contains(err.Error(), `"trust"`) {
+					t.Errorf("Register = %v, want not-found error naming the volume", err)
+				}
+			})
+
+			t.Run("re-registration supersedes stale entry without panicking", func(t *testing.T) {
+				r := newSystemInfoVolumeRefresher(source, nil)
+				dir1 := t.TempDir()
+				dir2 := t.TempDir()
+				registerTrustVolume(t, r, dir1, "uid-rereg")
+				registerTrustVolume(t, r, dir2, "uid-rereg")
+				if got := readProjected(t, dir2, "uid-rereg", "trust", "ca.pem"); got != string(certPEM) {
+					t.Errorf("content = %q, want the sanitized bundle", got)
+				}
+			})
+		})
+	}
 }

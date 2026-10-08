@@ -20,6 +20,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
 
@@ -32,7 +33,22 @@ import (
 func (e *Env) DeleteAteSystem(ctx context.Context) error {
 	log.Step("delete_ate_system")
 
-	if e.Cfg.Kind {
+	if e.Cfg.CertProvider == config.CertProviderCertManager {
+		overlay := installDir + "/cert-manager"
+		if e.Cfg.Kind {
+			overlay = installDir + "/kind-cert-manager"
+		}
+		manifest, err := e.Kustomize(overlay)
+		if err != nil {
+			return err
+		}
+		if err := e.Kube.DeleteBytes(ctx, manifest); err != nil {
+			return err
+		}
+		if err := e.Kube.DeletePath(ctx, e.Cfg.Manifest("cert-manager-issuers.yaml")); err != nil {
+			return err
+		}
+	} else if e.Cfg.Kind {
 		manifest, err := e.Kustomize(installDir + "/kind")
 		if err != nil {
 			return err
