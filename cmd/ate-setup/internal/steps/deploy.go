@@ -16,13 +16,8 @@ package steps
 
 import (
 	"context"
-	"fmt"
-	"strconv"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
@@ -49,9 +44,8 @@ type DeployOptions struct {
 	SetupCSI string
 }
 
-// DeployAteSystem installs the whole control plane: CRDs, RBAC, the
-// podcertificate controller, the store, ateapi, the controller, atenet, and
-// atelet.
+// DeployAteSystem installs the whole control plane: CRDs, RBAC, cert-manager,
+// the store, ateapi, the controller, atenet, and atelet.
 func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	log.Step("deploy_ate_system")
 
@@ -82,18 +76,9 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 		return err
 	}
 
-	// The podcertificate controller goes first so it starts signing and
-	// publishing trust bundles immediately.
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
-		return err
-	}
-	if err := e.applyPodcertWorkersOverride(ctx); err != nil {
-		return err
-	}
-	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespacePodCert, "podcertificate-controller", e.Cfg.WaitTimeout(BootstrapTimeout)); err != nil {
-		return err
-	}
-	if err := e.WaitForPodCertificateTrustBundles(ctx); err != nil {
+	// cert-manager, cert-manager-csi-driver, trust-manager, and the Substrate
+	// issuers/bundles go first so trust bundles and CSI volumes are ready.
+	if err := e.EnsureCertManager(ctx); err != nil {
 		return err
 	}
 	if err := e.SetupCSI(ctx, opts.SetupCSI); err != nil {
@@ -171,49 +156,6 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 		if err := e.Kube.RolloutStatus(ctx, w.kind, NamespaceAteSystem, w.name, e.Cfg.RolloutTimeout); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// applyPodcertWorkersOverride sets WORKERS_PER_SIGNER on podcertificate-controller if configured.
-func (e *Env) applyPodcertWorkersOverride(ctx context.Context) error {
-	if e.Cfg.PodcertWorkersPerSigner <= 0 {
-		return nil
-	}
-	workers := strconv.Itoa(e.Cfg.PodcertWorkersPerSigner)
-	dep, err := e.Kube.Typed.AppsV1().Deployments(NamespacePodCert).Get(ctx, "podcertificate-controller", metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("getting podcertificate-controller deployment: %w", err)
-	}
-
-	if len(dep.Spec.Template.Spec.Containers) == 0 {
-		return nil
-	}
-	found := false
-	for i, envVar := range dep.Spec.Template.Spec.Containers[0].Env {
-		if envVar.Name == "WORKERS_PER_SIGNER" {
-			if envVar.Value == workers {
-				return nil
-			}
-			dep.Spec.Template.Spec.Containers[0].Env[i].Value = workers
-			found = true
-			break
-		}
-	}
-	if !found {
-		dep.Spec.Template.Spec.Containers[0].Env = append(dep.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
-			Name:  "WORKERS_PER_SIGNER",
-			Value: workers,
-		})
-	}
-
-	log.Infof("Overriding WORKERS_PER_SIGNER with %s", workers)
-	_, err = e.Kube.Typed.AppsV1().Deployments(NamespacePodCert).Update(ctx, dep, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("updating podcertificate-controller WORKERS_PER_SIGNER: %w", err)
 	}
 	return nil
 }

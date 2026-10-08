@@ -35,14 +35,6 @@ const (
 	KindStatefulSet = "statefulset"
 )
 
-// clusterTrustBundleGVK identifies the certificates.k8s.io ClusterTrustBundle
-// the podcertificate controller publishes.
-var clusterTrustBundleGVK = schema.GroupVersionKind{
-	Group:   "certificates.k8s.io",
-	Version: "v1beta1",
-	Kind:    "ClusterTrustBundle",
-}
-
 // RolloutStatus blocks until a workload has finished rolling out, replacing
 // `kubectl rollout status <kind>/<name> -n <ns> --timeout=<t>`. The readiness
 // conditions match kubectl's own status viewers.
@@ -230,24 +222,22 @@ func (c *Client) WaitCondition(ctx context.Context, gvk schema.GroupVersionKind,
 	return nil
 }
 
-// WaitClusterTrustBundles blocks until the podcertificate controller has
-// published the identity bundles the rest of the install depends on.
-func (c *Client) WaitClusterTrustBundles(ctx context.Context, names []string, timeout time.Duration) error {
+// WaitTrustBundleConfigMaps blocks until trust-manager has published the named
+// trust bundle ConfigMaps in namespace with a non-empty trust-bundle.pem key.
+func (c *Client) WaitTrustBundleConfigMaps(ctx context.Context, namespace string, names []string, timeout time.Duration) error {
 	for _, name := range names {
-		var lastErr error
 		err := poll(ctx, timeout, func(ctx context.Context) (bool, error) {
-			ok, err := c.Exists(ctx, clusterTrustBundleGVK, "", name)
+			cm, err := c.Typed.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
 			if err != nil {
-				lastErr = err
-				return false, nil
+				if apierrors.IsNotFound(err) {
+					return false, nil
+				}
+				return false, err
 			}
-			return ok, nil
+			return cm.Data["trust-bundle.pem"] != "", nil
 		})
 		if err != nil {
-			if lastErr != nil {
-				return fmt.Errorf("waiting for ClusterTrustBundle %s: %w (last discovery error: %v)", name, err, lastErr)
-			}
-			return fmt.Errorf("waiting for ClusterTrustBundle %s: %w", name, err)
+			return fmt.Errorf("waiting for trust bundle ConfigMap %s/%s: %w", namespace, name, err)
 		}
 	}
 	return nil

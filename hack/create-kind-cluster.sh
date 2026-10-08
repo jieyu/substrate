@@ -18,6 +18,7 @@ set -o errexit -o nounset -o pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
+KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.32.2}"
 KUBECTL_CONTEXT="kind-${KIND_CLUSTER_NAME}"
 reg_name="kind-registry"
 reg_port="${KIND_REGISTRY_PORT:-5001}"
@@ -30,6 +31,7 @@ if [[ $# -gt 0 ]]; then
       echo
       echo "Configured through the environment:"
       echo "  KIND_CLUSTER_NAME  Name of the cluster to create (default: kind)."
+      echo "  KIND_NODE_IMAGE    Kind node image to run (default: kindest/node:v1.32.2)."
       echo "  IP_FAMILY          Address families for pods and Services: ipv4, ipv6 or dual (default: ipv4)."
       exit 0
       ;;
@@ -101,15 +103,10 @@ if [ "${HAS_KVM}" = "1" ]; then
 EOF
 fi
 cat <<EOF >> "${ROOT}/bin/kind-config.yaml"
-# cmd/podcertcontroller depends on ClusterTrustBundle & PodCertificateRequest.
-# They are not enabled by default as of Kubernetes v1.36
-# https://github.com/kubernetes/kubernetes/blob/master/test/compatibility_lifecycle/reference/versioned_feature_list.yaml
-featureGates:
-  ClusterTrustBundle: true
-  ClusterTrustBundleProjection: true
-  PodCertificateRequest: true
-runtimeConfig:
-  "certificates.k8s.io/v1beta1": "true"
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
 networking:
   ipFamily: ${IP_FAMILY}
 # The install pulls ~570MB of third-party images (postgres, prometheus, the otel
@@ -143,8 +140,8 @@ if [[ "${IP_FAMILY}" != "ipv4" &&
   fi
 fi
 
-echo "Creating kind cluster '${KIND_CLUSTER_NAME}'..."
-"${ROOT}"/hack/kind.sh create cluster --name "${KIND_CLUSTER_NAME}" --config "${ROOT}/bin/kind-config.yaml"
+echo "Creating kind cluster '${KIND_CLUSTER_NAME}' (image=${KIND_NODE_IMAGE})..."
+"${ROOT}"/hack/kind.sh create cluster --name "${KIND_CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}" --config "${ROOT}/bin/kind-config.yaml"
 
 # A daemon with IPv6 off hands kind a v4-only network whatever it asked for.
 if [[ "${IP_FAMILY}" != "ipv4" &&

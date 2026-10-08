@@ -22,21 +22,23 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 // EgressTrustBundleName is the well-known name of the egress gateway CA
-// bundle (#823): the trust anchors for the per-SNI leaves the egress gateway
-// mints, maintained by atecontroller from the egress-mitm-ca-pool.
-const EgressTrustBundleName = "egress-mitm.ate.dev"
+// bundle: the trust anchors for the per-SNI leaves the egress gateway
+// mints, maintained by atecontroller from the egress-mitm-ca-pool via a
+// trust-manager Bundle.
+const (
+	EgressTrustBundleName      = "egress-mitm.ate.dev"
+	trustBundleConfigMapKey    = "trust-bundle.pem"
+	trustBundleConfigNamespace = "ate-system"
+)
 
 // supportedTrustBundles maps the bundle names the trustBundle data source
-// may reference to their backing ClusterTrustBundles.
-//
-// TODO(#932): select by signer name + label selector, merging the matches, so
-// a new root can be trialed on a subset of workloads.
+// may reference to their backing trust-manager synced ConfigMaps in ate-system.
 var supportedTrustBundles = map[string]string{
-	EgressTrustBundleName: "egress-mitm.ate.dev:mitm:primary-bundle",
+	EgressTrustBundleName: "egress-mitm-trust-bundle",
 }
 
 // supportedTrustBundleNames returns the allowlist, sorted, for error text.
@@ -50,7 +52,7 @@ func supportedTrustBundleNames() string {
 }
 
 // bundleNamesFor returns the allowlisted bundle names backed by the
-// ClusterTrustBundle objectName.
+// ConfigMap objectName.
 func bundleNamesFor(objectName string) []string {
 	var names []string
 	for name, object := range supportedTrustBundles {
@@ -61,20 +63,20 @@ func bundleNamesFor(objectName string) []string {
 	return names
 }
 
-// rawTrustBundle returns the unsanitized contents of the ClusterTrustBundle
-// backing the allowlisted bundle name.
-func rawTrustBundle(lister certlisters.ClusterTrustBundleLister, name string) (objectName, raw string, err error) {
+// rawTrustBundle returns the unsanitized contents of the trust-manager synced
+// ConfigMap backing the allowlisted bundle name.
+func rawTrustBundle(lister corelisters.ConfigMapNamespaceLister, name string) (objectName, raw string, err error) {
 	objectName, supported := supportedTrustBundles[name]
 	if !supported {
 		return "", "", fmt.Errorf("trust bundle %q is not supported by this deployment (supported: %s)", name, supportedTrustBundleNames())
 	}
-	bundle, err := lister.Get(objectName)
+	cm, err := lister.Get(objectName)
 	if apierrors.IsNotFound(err) {
-		return "", "", fmt.Errorf("trust bundle %q: ClusterTrustBundle %q not found", name, objectName)
+		return "", "", fmt.Errorf("trust bundle %q: ConfigMap %q not found", name, objectName)
 	} else if err != nil {
-		return "", "", fmt.Errorf("trust bundle %q: while reading ClusterTrustBundle %q: %w", name, objectName, err)
+		return "", "", fmt.Errorf("trust bundle %q: while reading ConfigMap %q: %w", name, objectName, err)
 	}
-	return objectName, bundle.Spec.TrustBundle, nil
+	return objectName, cm.Data[trustBundleConfigMapKey], nil
 }
 
 // trustBundleHash hashes the raw backing contents. The sanitized output is

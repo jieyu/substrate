@@ -69,19 +69,7 @@ func (e *Env) SetupCSI(ctx context.Context, driver string) error {
 	if err := e.EnsureAteSystemNamespace(ctx); err != nil {
 		return err
 	}
-	if err := e.EnsurePodCertificateCAs(ctx); err != nil {
-		return err
-	}
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
-		return err
-	}
-	if err := e.applyPodcertWorkersOverride(ctx); err != nil {
-		return err
-	}
-	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespacePodCert, "podcertificate-controller", e.Cfg.WaitTimeout(BootstrapTimeout)); err != nil {
-		return err
-	}
-	if err := e.WaitForPodCertificateTrustBundles(ctx); err != nil {
+	if err := e.EnsureCertManager(ctx); err != nil {
 		return err
 	}
 

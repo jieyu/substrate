@@ -263,9 +263,6 @@ blind_spots:
       The hit and miss counter exists. But the garbage collector (the 85% and
       80% limits) and the time to prepare an image send nothing. Thus you cannot
       see the disk pressure from the layer pool.
-  - area: podcertcontroller
-    code: cmd/podcertcontroller
-    brief: This component has no metrics.
   - area: golden snapshot pipeline
     code: cmd/ateapi/internal/controlapi/template_reconciler.go
     brief: The template reconciler in ate-api has no instruments. Thus nothing measures a build of a golden image.

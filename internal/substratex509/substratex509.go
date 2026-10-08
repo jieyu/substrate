@@ -87,7 +87,7 @@ func PodIdentityFromCertificate(cert *x509.Certificate) (*PodIdentity, error) {
 	}
 
 	if podIdentityCount == 0 {
-		return nil, nil
+		return podIdentityFromCSICertificate(cert), nil
 	}
 	if podIdentityCount > 1 {
 		return nil, fmt.Errorf("certificate contains multiple PodIdentity extensions")
@@ -103,6 +103,45 @@ func PodIdentityFromCertificate(cert *x509.Certificate) (*PodIdentity, error) {
 	}
 
 	return pod, nil
+}
+
+// podIdentityFromCSICertificate extracts pod identity fields from a certificate
+// issued by cert-manager-csi-driver, which populates a SPIFFE URI SAN
+// (spiffe://<domain>/ns/<namespace>/sa/<sa>), Subject CommonName (<pod-uid>),
+// and optional DNS SAN (<pod-name>.<namespace>.pod.cluster.local).
+func podIdentityFromCSICertificate(cert *x509.Certificate) *PodIdentity {
+	if cert.Subject.CommonName == "" {
+		return nil
+	}
+	var ns, sa string
+	for _, u := range cert.URIs {
+		if u == nil || u.Scheme != "spiffe" {
+			continue
+		}
+		parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+		if len(parts) == 4 && parts[0] == "ns" && parts[2] == "sa" && parts[1] != "" && parts[3] != "" {
+			ns = parts[1]
+			sa = parts[3]
+			break
+		}
+	}
+	if ns == "" || sa == "" {
+		return nil
+	}
+	var podName string
+	suffix := "." + ns + ".pod.cluster.local"
+	for _, dns := range cert.DNSNames {
+		if name, ok := strings.CutSuffix(dns, suffix); ok && name != "" {
+			podName = name
+			break
+		}
+	}
+	return &PodIdentity{
+		Namespace:          ns,
+		ServiceAccountName: sa,
+		PodName:            podName,
+		PodUID:             cert.Subject.CommonName,
+	}
 }
 
 func validatePodIdentity(pod *PodIdentity) error {

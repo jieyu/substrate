@@ -88,8 +88,8 @@ var (
 	port              = pflag.Int("port", atelet.DefaultPort, "The port to listen on")
 	metricsListenAddr = pflag.String("metrics-listen-addr", ":9090", "Address and port the prometheus metrics server should listen on.")
 
-	grpcServerCredBundle = pflag.String("grpc-server-cred-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "Credential bundle atelet presents as its gRPC serving certificate.")
-	clientCACerts        = pflag.String("client-ca-certs", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "CA bundle used to verify gRPC client certificates.")
+	grpcServerCredBundle = pflag.String("grpc-server-cred-bundle", "/run/podidentity.podcert.ate.dev/tls.crt", "Credential bundle atelet presents as its gRPC serving certificate.")
+	clientCACerts        = pflag.String("client-ca-certs", "/run/podidentity-ca/trust-bundle.pem", "CA bundle used to verify gRPC client certificates.")
 	ateapiAddress        = pflag.String("ateapi-address", "k8s:///api.ate-system.svc:443", "ateapi gRPC target used by the credential broker.")
 	ateapiCAFile         = pflag.String("ateapi-ca-file", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "CA bundle used to verify ateapi.")
 	ateapiServerName     = pflag.String("ateapi-server-name", "api.ate-system.svc", "DNS name expected on the ateapi certificate.")
@@ -271,19 +271,20 @@ func main() {
 	ateFactory := externalversions.NewSharedInformerFactory(ateClient, 0)
 	csiDriverConfigLister := ateFactory.Api().V1alpha1().CSIDriverConfigs().Lister()
 
-	clusterTrustBundleInformerFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, 24*time.Hour,
+	trustBundleInformerFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, 24*time.Hour,
+		informers.WithNamespace(trustBundleConfigNamespace),
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
 			o.FieldSelector = fields.OneTermEqualSelector("metadata.name", supportedTrustBundles[EgressTrustBundleName]).String()
 		}))
-	clusterTrustBundles := clusterTrustBundleInformerFactory.Certificates().V1beta1().ClusterTrustBundles()
-	systemInfoVolumes := newSystemInfoVolumeRefresher(clusterTrustBundles.Lister(), clusterTrustBundles.Informer())
+	trustBundleConfigMaps := trustBundleInformerFactory.Core().V1().ConfigMaps()
+	systemInfoVolumes := newSystemInfoVolumeRefresher(trustBundleConfigMaps.Lister().ConfigMaps(trustBundleConfigNamespace), trustBundleConfigMaps.Informer())
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	ateFactory.Start(stopCh)
-	clusterTrustBundleInformerFactory.Start(stopCh)
+	trustBundleInformerFactory.Start(stopCh)
 	ateFactory.WaitForCacheSync(stopCh)
-	clusterTrustBundleInformerFactory.WaitForCacheSync(stopCh)
+	trustBundleInformerFactory.WaitForCacheSync(stopCh)
 
 	wmService := NewService(
 		ctx,

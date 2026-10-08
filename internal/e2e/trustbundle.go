@@ -28,16 +28,17 @@ import (
 
 // Constants of atecontroller's EgressMITMTrustReconciler (#946): the CA pool
 // Secret it watches (the key is what `kubectl-ate admin make-ca-pool` writes)
-// and the ClusterTrustBundle it derives from that pool — the backing object
-// of the allowlisted "egress-mitm.ate.dev" bundle the probe fixture projects.
+// and the trust-manager ConfigMap derived from the Bundle it reconciles — the
+// backing object of the allowlisted "egress-mitm.ate.dev" bundle the probe
+// fixture projects.
 //
-// Suites provision the POOL and let the real reconciler publish the bundle,
-// exercising the whole chain (pool -> reconciler -> bundle -> projection).
-// Writing the bundle directly is not an option: the reconciler watches it
-// and reverts or deletes hand-written contents.
+// Suites provision the POOL and let the real reconciler and trust-manager
+// publish the bundle ConfigMap, exercising the whole chain.
 const (
-	// EgressTrustBundleObjectName is the reconciler-owned ClusterTrustBundle.
-	EgressTrustBundleObjectName = "egress-mitm.ate.dev:mitm:primary-bundle"
+	// EgressTrustBundleName is the logical trust bundle name in ActorTemplate SystemInfoDataSource.
+	EgressTrustBundleName = "egress-mitm.ate.dev"
+	// EgressTrustBundleConfigMapName is the ConfigMap trust-manager publishes in ate-system.
+	EgressTrustBundleConfigMapName = "egress-mitm-trust-bundle"
 
 	egressCAPoolNamespace  = "ate-system"
 	egressCAPoolSecretName = "egress-mitm-ca-pool"
@@ -132,7 +133,7 @@ func createEgressTrustPool(t *testing.T, ctx context.Context, clients *Clients, 
 	return true
 }
 
-// waitForEgressTrustBundle polls the reconciler-owned bundle until its
+// waitForEgressTrustBundle polls the reconciler-owned bundle ConfigMap until its
 // contents match want, or are merely non-empty when want is "", keeping the
 // reconcile latency out of later assertions. Accepted race: this polls the
 // apiserver while atelet resolves from its informer cache, but the suites'
@@ -143,9 +144,9 @@ func waitForEgressTrustBundle(t *testing.T, ctx context.Context, clients *Client
 	var last string
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		ctb, err := clients.K8s.CertificatesV1beta1().ClusterTrustBundles().Get(ctx, EgressTrustBundleObjectName, metav1.GetOptions{})
+		cm, err := clients.K8s.CoreV1().ConfigMaps(egressCAPoolNamespace).Get(ctx, EgressTrustBundleConfigMapName, metav1.GetOptions{})
 		if err == nil {
-			if got := ctb.Spec.TrustBundle; got == want || (want == "" && got != "") {
+			if got := cm.Data["trust-bundle.pem"]; got == want || (want == "" && got != "") {
 				return
 			} else {
 				last = got
@@ -155,5 +156,5 @@ func waitForEgressTrustBundle(t *testing.T, ctx context.Context, clients *Client
 		}
 		time.Sleep(1 * time.Second)
 	}
-	t.Fatalf("timed out waiting for ClusterTrustBundle %q to carry the pool's root certificate (last observed: %.80q...); is atecontroller's EgressMITMTrustReconciler running?", EgressTrustBundleObjectName, last)
+	t.Fatalf("timed out waiting for ConfigMap %s/%s to carry the pool's root certificate (last observed: %.80q...); is atecontroller's EgressMITMTrustReconciler running?", egressCAPoolNamespace, EgressTrustBundleConfigMapName, last)
 }

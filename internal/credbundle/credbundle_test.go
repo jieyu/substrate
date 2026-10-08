@@ -58,6 +58,85 @@ func TestParsePKCS8PrivateKeyBlock(t *testing.T) {
 	}
 }
 
+func TestParseSeparateCertAndKeyFiles(t *testing.T) {
+	key := generateRSAKey(t)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal PKCS8 key: %v", err)
+	}
+	certDER := generateCertificate(t, 42)
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o600); err != nil {
+		t.Fatalf("write tls.crt: %v", err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatalf("write tls.key: %v", err)
+	}
+
+	for _, p := range []string{certPath, dir} {
+		cert, err := Parse(p)
+		if err != nil {
+			t.Fatalf("Parse(%q) error = %v", p, err)
+		}
+		if got := leafSerial(t, cert); got != 42 {
+			t.Fatalf("Parse(%q) leaf serial = %d, want 42", p, got)
+		}
+		if cert.PrivateKey == nil {
+			t.Fatalf("Parse(%q) private key is nil", p)
+		}
+	}
+}
+
+func TestLoaderPicksUpCSIRotation(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+
+	writeCSIPair := func(serial int64) {
+		keyDER, err := x509.MarshalPKCS8PrivateKey(generateRSAKey(t))
+		if err != nil {
+			t.Fatalf("marshal PKCS8 key: %v", err)
+		}
+		certDER := generateCertificate(t, serial)
+		if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o600); err != nil {
+			t.Fatalf("write tls.crt: %v", err)
+		}
+		if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+			t.Fatalf("write tls.key: %v", err)
+		}
+	}
+
+	writeCSIPair(10)
+	getCert := Loader(certPath)
+	cert, err := getCert(nil)
+	if err != nil {
+		t.Fatalf("Loader() first call error = %v", err)
+	}
+	if got := leafSerial(t, cert); got != 10 {
+		t.Fatalf("Loader() leaf serial = %d, want 10", got)
+	}
+
+	fi, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatalf("stat tls.crt: %v", err)
+	}
+	writeCSIPair(20)
+	bumped := fi.ModTime().Add(time.Second)
+	if err := os.Chtimes(certPath, bumped, bumped); err != nil {
+		t.Fatalf("bump mtime: %v", err)
+	}
+
+	cert, err = getCert(nil)
+	if err != nil {
+		t.Fatalf("Loader() after rotation error = %v", err)
+	}
+	if got := leafSerial(t, cert); got != 20 {
+		t.Fatalf("Loader() leaf serial after rotation = %d, want 20", got)
+	}
+}
+
 func TestParseRejectsNonPKCS8PrivateKeyBlock(t *testing.T) {
 	certDER := generateCertificate(t, 1)
 	bundle := append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(generateRSAKey(t))})...)

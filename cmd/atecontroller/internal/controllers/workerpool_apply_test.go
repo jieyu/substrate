@@ -691,33 +691,28 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 					WithType(corev1.HostPathDirectoryOrCreate)),
 			corev1ac.Volume().
 				WithName(atunnelIdentityVolume).
-				WithProjected(corev1ac.ProjectedVolumeSource().
-					WithSources(
-						corev1ac.VolumeProjection().
-							WithPodCertificate(corev1ac.PodCertificateProjection().
-								WithSignerName("podidentity.podcert.ate.dev/identity").
-								WithKeyType("ECDSAP256").
-								WithCredentialBundlePath("credential-bundle.pem")),
-						corev1ac.VolumeProjection().
-							WithClusterTrustBundle(corev1ac.ClusterTrustBundleProjection().
-								WithSignerName("podidentity.podcert.ate.dev/identity").
-								WithLabelSelector(metav1ac.LabelSelector().
-									WithMatchLabels(map[string]string{"podcert.ate.dev/canarying": "live"})).
-								WithPath("trust-bundle.pem")),
-					),
-				),
+				WithCSI(corev1ac.CSIVolumeSource().
+					WithDriver("csi.cert-manager.io").
+					WithReadOnly(true).
+					WithVolumeAttributes(map[string]string{
+						"csi.cert-manager.io/issuer-name":   "podidentity-issuer",
+						"csi.cert-manager.io/issuer-kind":   "ClusterIssuer",
+						"csi.cert-manager.io/common-name":   "${POD_UID}",
+						"csi.cert-manager.io/dns-names":     "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local",
+						"csi.cert-manager.io/uri-sans":      "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}",
+						"csi.cert-manager.io/key-algorithm": "ECDSA",
+						"csi.cert-manager.io/key-size":      "256",
+						"csi.cert-manager.io/key-encoding":  "PKCS8",
+						"csi.cert-manager.io/key-usages":    "digital signature,key encipherment,server auth,client auth",
+					})),
+			corev1ac.Volume().
+				WithName(atunnelIdentityTrustVolume).
+				WithConfigMap(corev1ac.ConfigMapVolumeSource().
+					WithName("podidentity-trust-bundle")),
 			corev1ac.Volume().
 				WithName(atunnelEgressTrustVolume).
-				WithProjected(corev1ac.ProjectedVolumeSource().
-					WithSources(
-						corev1ac.VolumeProjection().
-							WithClusterTrustBundle(corev1ac.ClusterTrustBundleProjection().
-								WithSignerName("servicedns.podcert.ate.dev/identity").
-								WithLabelSelector(metav1ac.LabelSelector().
-									WithMatchLabels(map[string]string{"podcert.ate.dev/canarying": "live"})).
-								WithPath("trust-bundle.pem")),
-					),
-				),
+				WithConfigMap(corev1ac.ConfigMapVolumeSource().
+					WithName("servicedns-trust-bundle")),
 		).
 		WithContainers(corev1ac.Container().
 			WithName("ateom").
@@ -726,8 +721,8 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 				"--pod-uid=$(POD_UID)",
 				"--atunnel-listen-address=:443",
 				"--atunnel-connect-listen-address=:8443",
-				"--atunnel-credential-bundle="+atunnelIdentityMountPath+"/credential-bundle.pem",
-				"--atunnel-trust-bundle="+atunnelIdentityMountPath+"/trust-bundle.pem",
+				"--atunnel-credential-bundle="+atunnelIdentityMountPath+"/tls.crt",
+				"--atunnel-trust-bundle="+atunnelIdentityTrustMountPath+"/trust-bundle.pem",
 				"--atunnel-egress-listen-address=0.0.0.0:15001",
 				"--atunnel-egress-trust-bundle="+atunnelEgressTrustMountPath+"/trust-bundle.pem",
 			).
@@ -777,6 +772,10 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 				corev1ac.VolumeMount().
 					WithName(atunnelIdentityVolume).
 					WithMountPath(atunnelIdentityMountPath).
+					WithReadOnly(true),
+				corev1ac.VolumeMount().
+					WithName(atunnelIdentityTrustVolume).
+					WithMountPath(atunnelIdentityTrustMountPath).
 					WithReadOnly(true),
 				corev1ac.VolumeMount().
 					WithName(atunnelEgressTrustVolume).

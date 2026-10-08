@@ -31,9 +31,9 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/volumepath"
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 )
@@ -77,7 +77,7 @@ type registeredActor struct {
 // systemInfoVolumeRefresher writes system-info volumes when an actor starts
 // and refreshes them as needed.
 type systemInfoVolumeRefresher struct {
-	lister    certlisters.ClusterTrustBundleLister
+	lister    corelisters.ConfigMapNamespaceLister
 	hasSynced cache.InformerSynced
 
 	// queue carries bundle names from informer events to the run loop.
@@ -90,8 +90,8 @@ type systemInfoVolumeRefresher struct {
 	actors map[string]*registeredActor
 }
 
-// newSystemInfoVolumeRefresher subscribes to ClusterTrustBundle events.
-func newSystemInfoVolumeRefresher(lister certlisters.ClusterTrustBundleLister, informer cache.SharedIndexInformer) *systemInfoVolumeRefresher {
+// newSystemInfoVolumeRefresher subscribes to trust bundle ConfigMap events.
+func newSystemInfoVolumeRefresher(lister corelisters.ConfigMapNamespaceLister, informer cache.SharedIndexInformer) *systemInfoVolumeRefresher {
 	r := &systemInfoVolumeRefresher{
 		lister: lister,
 		queue:  workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
@@ -166,7 +166,7 @@ func (r *systemInfoVolumeRefresher) collectData(ref resources.ActorRef, actorUID
 			}
 			pemBundle, err := pemutil.SanitizeCertificateBundle([]byte(raw))
 			if err != nil {
-				return nil, nil, fmt.Errorf("system-info projection %q: unusable ClusterTrustBundle %q: %w", tb.GetPath(), objectName, err)
+				return nil, nil, fmt.Errorf("system-info projection %q: unusable trust bundle ConfigMap %q: %w", tb.GetPath(), objectName, err)
 			}
 			payload[tb.GetPath()] = pemBundle
 			bundleHashes[tb.GetName()] = trustBundleHash(raw)
@@ -280,11 +280,11 @@ func (r *systemInfoVolumeRefresher) eventHandler() cache.ResourceEventHandler {
 		if d, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 			obj = d.Obj
 		}
-		ctb, ok := obj.(*certsv1beta1.ClusterTrustBundle)
+		cm, ok := obj.(*corev1.ConfigMap)
 		if !ok {
 			return
 		}
-		for _, name := range bundleNamesFor(ctb.Name) {
+		for _, name := range bundleNamesFor(cm.Name) {
 			r.queue.Add(name)
 		}
 	}

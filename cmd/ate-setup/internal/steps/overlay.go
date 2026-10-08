@@ -162,8 +162,8 @@ func (e *Env) patchAtenetEgressInject(raw []byte) ([]byte, error) {
 func emitEgressInjectFlags(name, address, serverName string) string {
 	return fmt.Sprintf(`- --credential-provider-name=%s
 - --credential-provider-address=%s
-- --credential-provider-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
-- --credential-provider-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+- --credential-provider-ca-file=/run/servicedns-ca/trust-bundle.pem
+- --credential-provider-client-cert=/run/podidentity.podcert.ate.dev/tls.crt
 - --credential-provider-server-name=%s`, name, address, serverName)
 }
 

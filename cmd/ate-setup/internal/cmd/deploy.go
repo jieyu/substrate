@@ -33,8 +33,8 @@ var deployAteSystemCmd = &cobra.Command{
 	Short: "Deploy the core system: CRDs, RBAC, store, apiserver, controller, atenet, and atelet",
 	Long: `Deploy the whole Agent Substrate control plane.
 
-This installs the CRDs and RBAC, the podcertificate controller and the secrets
-it signs, PostgreSQL, ate-api-server, ate-controller, the atenet dataplane, and
+This installs the CRDs and RBAC, cert-manager (with CSI driver and trust-manager),
+PostgreSQL, ate-api-server, ate-controller, the atenet dataplane, and
 the atelet DaemonSet, then waits for each to roll out.
 
 The bundled PostgreSQL StatefulSet is skipped when

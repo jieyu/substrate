@@ -104,7 +104,7 @@ spec:
         image: ko://github.com/agent-substrate/substrate/cmd/atecontroller
         args:
         - --ateapi-ca-file=/run/servicedns-ca/trust-bundle.pem
-        - --ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+        - --ateapi-client-cert=/run/podidentity.podcert.ate.dev/tls.crt
         env:
         - name: POD_NAME
           valueFrom:
@@ -137,23 +137,26 @@ spec:
         # Controller's own client identity presented to ateapi.
         - name: "podidentity"
           mountPath: "/run/podidentity.podcert.ate.dev"
+          readOnly: true
         # Trust bundle used to verify ateapi's servicedns serving cert.
         - name: "servicedns-ca"
           mountPath: "/run/servicedns-ca"
+          readOnly: true
       volumes:
       - name: "podidentity"
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
+        csi:
+          driver: csi.cert-manager.io
+          readOnly: true
+          volumeAttributes:
+            csi.cert-manager.io/issuer-name: podidentity-issuer
+            csi.cert-manager.io/issuer-kind: ClusterIssuer
+            csi.cert-manager.io/common-name: "${POD_UID}"
+            csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+            csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+            csi.cert-manager.io/key-encoding: PKCS8
+            csi.cert-manager.io/key-algorithm: ECDSA
+            csi.cert-manager.io/key-size: "256"
+            csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
       - name: "servicedns-ca"
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
+        configMap:
+          name: "servicedns-trust-bundle"

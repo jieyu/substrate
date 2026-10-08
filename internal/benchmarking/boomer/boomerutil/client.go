@@ -32,7 +32,7 @@ const (
 	// ateapiCredBundle is the benchmark's own pod certificate. Both are
 	// projected in by benchmarking/locust/manifests/locust.yaml.
 	ateapiCAFile     = "/run/servicedns-ca/ca.crt"
-	ateapiCredBundle = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+	ateapiCredBundle = "/run/podidentity.podcert.ate.dev/tls.crt"
 
 	// ateapiServerName is the DNS SAN on the apiserver's serving cert, which
 	// is shorter than the endpoint the benchmark dials.

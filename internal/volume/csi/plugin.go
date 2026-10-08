@@ -37,7 +37,7 @@ import (
 
 const (
 	// DefaultClientCertPath is the path to the pod identity credential bundle.
-	DefaultClientCertPath = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+	DefaultClientCertPath = "/run/podidentity.podcert.ate.dev/tls.crt"
 	// DefaultCACertPath is the path to the servicedns trust bundle.
 	DefaultCACertPath = "/run/servicedns.podcert.ate.dev/trust-bundle.pem"
 )

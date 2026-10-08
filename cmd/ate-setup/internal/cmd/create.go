@@ -61,11 +61,6 @@ func init() {
 			run:   (*steps.Env).CreateEgressMITMCAPoolSecret,
 		},
 		{
-			use:   "podcertificate-controller-cas",
-			short: "Create the podcertificate controller's servicedns and podidentity CA pools",
-			run:   (*steps.Env).CreatePodCertificateControllerCAs,
-		},
-		{
 			use:   "api-server-env-vars",
 			short: "Create the ate-api-server environment ConfigMap",
 			run:   (*steps.Env).CreateAPIServerEnvVars,

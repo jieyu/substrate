@@ -46,23 +46,7 @@ func (e *Env) DeployPostgres(ctx context.Context) error {
 	if err := e.EnsureAteSystemNamespace(ctx); err != nil {
 		return err
 	}
-	if err := e.EnsurePodCertificateCAs(ctx); err != nil {
-		return err
-	}
-
-	// The StatefulSet's projected serving certificate is issued by this
-	// controller. Applying it here makes `deploy postgres` usable on a fresh
-	// cluster as well as after `deploy ate-system`.
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
-		return err
-	}
-	if err := e.applyPodcertWorkersOverride(ctx); err != nil {
-		return err
-	}
-	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespacePodCert, "podcertificate-controller", e.Cfg.WaitTimeout(BootstrapTimeout)); err != nil {
-		return err
-	}
-	if err := e.WaitForPodCertificateTrustBundles(ctx); err != nil {
+	if err := e.EnsureCertManager(ctx); err != nil {
 		return err
 	}
 

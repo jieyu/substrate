@@ -26,9 +26,9 @@ import (
 	"testing"
 	"time"
 
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -51,29 +51,29 @@ func testCertPEM(t *testing.T) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-func ctbLister(t *testing.T, bundles ...*certsv1beta1.ClusterTrustBundle) certlisters.ClusterTrustBundleLister {
+func cmLister(t *testing.T, cms ...*corev1.ConfigMap) corelisters.ConfigMapNamespaceLister {
 	t.Helper()
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	for _, b := range bundles {
-		if err := indexer.Add(b); err != nil {
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	for _, cm := range cms {
+		if err := indexer.Add(cm); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return certlisters.NewClusterTrustBundleLister(indexer)
+	return corelisters.NewConfigMapLister(indexer).ConfigMaps(trustBundleConfigNamespace)
 }
 
-// egressTrustBundleObjectName is the backing ClusterTrustBundle the allowlist
-// maps EgressTrustBundleName to (named by atecontroller's reconciler).
-const egressTrustBundleObjectName = "egress-mitm.ate.dev:mitm:primary-bundle"
+// egressTrustBundleObjectName is the backing ConfigMap the allowlist
+// maps EgressTrustBundleName to (synced by trust-manager from the Bundle reconciled by atecontroller).
+const egressTrustBundleObjectName = "egress-mitm-trust-bundle"
 
 func TestRawTrustBundle(t *testing.T) {
 	certPEM := testCertPEM(t)
 
 	t.Run("resolves the allowlisted name through the mapped object, unsanitized", func(t *testing.T) {
 		raw := "garbage\n" + string(certPEM)
-		lister := ctbLister(t, &certsv1beta1.ClusterTrustBundle{
-			ObjectMeta: metav1.ObjectMeta{Name: egressTrustBundleObjectName},
-			Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: raw},
+		lister := cmLister(t, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: trustBundleConfigNamespace, Name: egressTrustBundleObjectName},
+			Data:       map[string]string{trustBundleConfigMapKey: raw},
 		})
 		objectName, got, err := rawTrustBundle(lister, EgressTrustBundleName)
 		if err != nil {
@@ -90,9 +90,9 @@ func TestRawTrustBundle(t *testing.T) {
 	t.Run("unsupported bundle name fails naming it and the allowlist", func(t *testing.T) {
 		// The lister has the bundle; the allowlist must still reject it —
 		// supported names are a substrate decision, not a cluster lookup.
-		lister := ctbLister(t, &certsv1beta1.ClusterTrustBundle{
-			ObjectMeta: metav1.ObjectMeta{Name: "my-own-bundle"},
-			Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: string(certPEM)},
+		lister := cmLister(t, &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: trustBundleConfigNamespace, Name: "my-own-bundle"},
+			Data:       map[string]string{trustBundleConfigMapKey: string(certPEM)},
 		})
 		_, _, err := rawTrustBundle(lister, "my-own-bundle")
 		if err == nil || !strings.Contains(err.Error(), `"my-own-bundle"`) || !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), EgressTrustBundleName) {
@@ -101,7 +101,7 @@ func TestRawTrustBundle(t *testing.T) {
 	})
 
 	t.Run("missing bundle fails naming it", func(t *testing.T) {
-		_, _, err := rawTrustBundle(ctbLister(t), EgressTrustBundleName)
+		_, _, err := rawTrustBundle(cmLister(t), EgressTrustBundleName)
 		if err == nil || !strings.Contains(err.Error(), egressTrustBundleObjectName) || !strings.Contains(err.Error(), "not found") {
 			t.Errorf("error = %v, want not-found naming the backing object", err)
 		}

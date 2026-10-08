@@ -22,8 +22,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 )
 
@@ -228,19 +226,21 @@ func TestRenderServerPod_Volumes(t *testing.T) {
 		Port:       8080,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "actor-identity", MountPath: "/run/actor-identity"},
-			{Name: "podidentity", MountPath: "/run/podidentity.podcert.ate.dev"},
+			{Name: "servicedns-ca", MountPath: "/run/servicedns.podcert.ate.dev"},
 		},
 		Volumes: []corev1.Volume{{
 			Name:         "actor-identity",
 			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "probe-actor-identity"}},
 		}, {
-			Name: "podidentity",
+			Name: "servicedns-ca",
 			VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 				Sources: []corev1.VolumeProjection{{
-					ClusterTrustBundle: &corev1.ClusterTrustBundleProjection{
-						SignerName:    ptr.To("servicedns.podcert.ate.dev/identity"),
-						LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"podcert.ate.dev/canarying": "live"}},
-						Path:          "trust-bundle.pem",
+					ConfigMap: &corev1.ConfigMapProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "servicedns-trust-bundle"},
+						Items: []corev1.KeyToPath{{
+							Key:  "trust-bundle.pem",
+							Path: "trust-bundle.pem",
+						}},
 					},
 				}},
 			}},
@@ -263,15 +263,12 @@ func TestRenderServerPod_Volumes(t *testing.T) {
 		t.Errorf("first volume = %+v, want the actor-identity Secret", pod.Spec.Volumes[0])
 	}
 	projected := pod.Spec.Volumes[1].Projected
-	if projected == nil || len(projected.Sources) != 1 || projected.Sources[0].ClusterTrustBundle == nil {
-		t.Fatalf("second volume = %+v, want a clusterTrustBundle projection", pod.Spec.Volumes[1])
+	if projected == nil || len(projected.Sources) != 1 || projected.Sources[0].ConfigMap == nil {
+		t.Fatalf("second volume = %+v, want a configMap projection", pod.Spec.Volumes[1])
 	}
-	bundle := projected.Sources[0].ClusterTrustBundle
-	if got, want := ptr.Deref(bundle.SignerName, ""), "servicedns.podcert.ate.dev/identity"; got != want {
-		t.Errorf("projected signerName = %q, want %q", got, want)
-	}
-	if got := bundle.LabelSelector.MatchLabels["podcert.ate.dev/canarying"]; got != "live" {
-		t.Errorf("projected label selector = %+v, want the live canary label", bundle.LabelSelector)
+	cm := projected.Sources[0].ConfigMap
+	if got, want := cm.Name, "servicedns-trust-bundle"; got != want {
+		t.Errorf("projected configMap name = %q, want %q", got, want)
 	}
 
 	// Every mount has to name a volume that exists: a typo here yields a pod

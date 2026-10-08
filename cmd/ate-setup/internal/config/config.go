@@ -45,9 +45,9 @@ const DefaultRolloutTimeout = 60 * time.Second
 
 // DefaultPostgresConnectionString mirrors default_postgres_connection_string in
 // the shell installer: the apiserver reaches PostgreSQL over mTLS using the
-// podcertificate controller's projected servicedns trust bundle and its own
+// trust-manager servicedns trust bundle and its own cert-manager CSI
 // podidentity credential bundle.
-const DefaultPostgresConnectionString = "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns.podcert.ate.dev/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/credential-bundle.pem&sslkey=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+const DefaultPostgresConnectionString = "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns-ca/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/tls.crt&sslkey=/run/podidentity.podcert.ate.dev/tls.key"
 
 // DefaultPostgresSchema mirrors the shell installer's default for
 // ATE_API_POSTGRES_SCHEMA, the PostgreSQL schema holding the Substrate tables.

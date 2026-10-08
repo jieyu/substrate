@@ -352,6 +352,23 @@ func TestXdsServer_UpdateSnapshot_WithHttps(t *testing.T) {
 	}
 }
 
+func TestBuildCertSecret_CSIPair(t *testing.T) {
+	const certPath = "/run/servicedns.podcert.ate.dev/tls.crt"
+	const keyPath = "/run/servicedns.podcert.ate.dev/tls.key"
+
+	secret := buildCertSecret(HTTPSCertSecretName, certPath)
+	tlsCert := secret.GetTlsCertificate()
+	if got := tlsCert.GetCertificateChain().GetFilename(); got != certPath {
+		t.Errorf("Expected certificate chain filename '%s', got '%s'", certPath, got)
+	}
+	if got := tlsCert.GetPrivateKey().GetFilename(); got != keyPath {
+		t.Errorf("Expected private key filename '%s', got '%s'", keyPath, got)
+	}
+	if got, want := tlsCert.GetWatchedDirectory().GetPath(), "/run/servicedns.podcert.ate.dev"; got != want {
+		t.Errorf("Expected watched directory '%s', got '%s'", want, got)
+	}
+}
+
 func TestXdsServer_UpdateSnapshot_HttpsWithoutCertPath(t *testing.T) {
 	server := NewXdsServer(18000)
 	server.SetConfig(8085, 50053, "127.0.0.1")

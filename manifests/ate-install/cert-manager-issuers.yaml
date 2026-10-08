@@ -1,0 +1,96 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ate-selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pod-identity-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: podidentity.podcert.ate.dev
+  secretName: pod-identity-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: ate-selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: podidentity-issuer
+spec:
+  ca:
+    secretName: pod-identity-ca-secret
+---
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: podidentity-trust-bundle
+spec:
+  sources:
+  - secret:
+      name: pod-identity-ca-secret
+      key: tls.crt
+  target:
+    configMap:
+      key: trust-bundle.pem
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: service-dns-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: servicedns.podcert.ate.dev
+  secretName: service-dns-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: ate-selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: servicedns-issuer
+spec:
+  ca:
+    secretName: service-dns-ca-secret
+---
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: servicedns-trust-bundle
+spec:
+  sources:
+  - secret:
+      name: service-dns-ca-secret
+      key: tls.crt
+  target:
+    configMap:
+      key: trust-bundle.pem

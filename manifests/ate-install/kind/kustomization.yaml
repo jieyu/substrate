@@ -26,7 +26,7 @@ resources:
   - ../ate-controller.yaml
   - ./atelet
   - ../atenet-router.yaml
-  - ../pod-certificate-controller.yaml
+  - ../cert-manager-issuers.yaml
   - ate-otel-config.yaml
   - rustfs.yaml
   - ./otel-collector.yaml

@@ -66,9 +66,9 @@ rules:
   - patch
   - update
 - apiGroups:
-  - certificates.k8s.io
+  - trust.cert-manager.io
   resources:
-  - clustertrustbundles
+  - bundles
   verbs:
   - create
   - delete
@@ -77,14 +77,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - certificates.k8s.io
-  resourceNames:
-  - egress-mitm.ate.dev/*
-  resources:
-  - signers
-  verbs:
-  - attest
 - apiGroups:
   - networking.k8s.io
   resources:

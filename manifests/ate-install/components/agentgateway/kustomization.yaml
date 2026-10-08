@@ -67,24 +67,18 @@ patches:
             mountPath: /etc/agentgateway
           - name: servicedns
             mountPath: /run/servicedns.podcert.ate.dev
+            readOnly: true
           - name: podidentity
             mountPath: /run/podidentity.podcert.ate.dev
+            readOnly: true
+          - name: podidentity-ca
+            mountPath: /run/podidentity-ca
+            readOnly: true
           - name: servicedns-ca
             mountPath: /run/servicedns-ca
+            readOnly: true
       - op: remove
         path: /spec/template/spec/containers/1
-      - op: add
-        path: /spec/template/spec/volumes/-
-        value:
-          name: servicedns-ca
-          projected:
-            sources:
-            - clusterTrustBundle:
-                signerName: servicedns.podcert.ate.dev/identity
-                labelSelector:
-                  matchLabels:
-                    podcert.ate.dev/canarying: live
-                path: trust-bundle.pem
   - target:
       group: apps
       version: v1
@@ -156,6 +150,9 @@ patches:
           - name: podidentity
             mountPath: /run/podidentity.podcert.ate.dev
             readOnly: true
+          - name: podidentity-ca
+            mountPath: /run/podidentity-ca
+            readOnly: true
           - name: servicedns-ca
             mountPath: /run/servicedns-ca
             readOnly: true
@@ -164,18 +161,6 @@ patches:
         value: atenet-egress-agentgateway-substrate-config
       - op: remove
         path: /spec/template/spec/containers/1
-      - op: add
-        path: /spec/template/spec/volumes/-
-        value:
-          name: servicedns-ca
-          projected:
-            sources:
-            - clusterTrustBundle:
-                signerName: servicedns.podcert.ate.dev/identity
-                labelSelector:
-                  matchLabels:
-                    podcert.ate.dev/canarying: live
-                path: trust-bundle.pem
   - target:
       version: v1
       kind: Service

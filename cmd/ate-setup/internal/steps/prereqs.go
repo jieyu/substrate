@@ -17,15 +17,15 @@ package steps
 import (
 	"context"
 
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
 
-// trustBundleNames are the ClusterTrustBundles the podcertificate controller
-// publishes once it is running. Workloads project them, so nothing that
-// depends on pod certificates can start before they exist.
+// trustBundleNames are the trust bundle ConfigMaps trust-manager publishes in
+// ate-system once it is running.
 var trustBundleNames = []string{
-	"podidentity.podcert.ate.dev:identity:primary-bundle",
-	"servicedns.podcert.ate.dev:identity:primary-bundle",
+	"podidentity-trust-bundle",
+	"servicedns-trust-bundle",
 }
 
 // EnsureAPIServerPrerequisites creates the secrets and config ate-api-server
@@ -41,9 +41,6 @@ func (e *Env) EnsureAPIServerPrerequisites(ctx context.Context) error {
 	}
 	// Derived from actor-id-ca-pool above, so it must come after it.
 	if err := e.ensureSecret(ctx, NamespaceAteSystem, SecretActorIDCACerts, e.CreateActorIDCACertsSecret); err != nil {
-		return err
-	}
-	if err := e.ensureSecret(ctx, NamespacePodCert, SecretServiceDNSCA, e.CreatePodCertificateControllerCAs); err != nil {
 		return err
 	}
 	// Always reconcile the PostgreSQL connection settings, so that a changed
@@ -62,26 +59,54 @@ func (e *Env) EnsureAPIServerPrerequisites(ctx context.Context) error {
 	return nil
 }
 
-// EnsurePodCertificateCAs creates the podcertificate signer pools if either is
-// missing.
-func (e *Env) EnsurePodCertificateCAs(ctx context.Context) error {
-	for _, name := range []string{SecretServiceDNSCA, SecretPodIdentityCA} {
-		exists, err := e.Kube.SecretExists(ctx, NamespacePodCert, name)
-		if err != nil {
+// EnsureCertManager installs cert-manager, cert-manager-csi-driver,
+// trust-manager, and the Substrate ClusterIssuers and Bundles, then waits for
+// trust-manager to publish both trust bundle ConfigMaps in ate-system.
+func (e *Env) EnsureCertManager(ctx context.Context) error {
+	log.Step("ensure_cert_manager")
+
+	if err := e.Kube.EnsureNamespace(ctx, NamespaceAteSystem); err != nil {
+		return err
+	}
+	if err := e.Kube.EnsureNamespace(ctx, NamespaceCertManager); err != nil {
+		return err
+	}
+
+	timeout := e.Cfg.WaitTimeout(BootstrapTimeout)
+
+	if err := e.Kube.ApplyPath(ctx, e.Cfg.Path("hack", "third_party", "cert-manager", "deploy", "cert-manager.yaml")); err != nil {
+		return err
+	}
+	for _, name := range []string{"cert-manager", "cert-manager-cainjector", "cert-manager-webhook"} {
+		if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespaceCertManager, name, timeout); err != nil {
 			return err
 		}
-		if !exists {
-			return e.CreatePodCertificateControllerCAs(ctx)
-		}
 	}
-	return nil
+
+	if err := e.Kube.ApplyPath(ctx, e.Cfg.Path("hack", "third_party", "cert-manager", "deploy", "cert-manager-csi-driver.yaml")); err != nil {
+		return err
+	}
+	if err := e.Kube.ApplyPath(ctx, e.Cfg.Path("hack", "third_party", "cert-manager", "deploy", "trust-manager.yaml")); err != nil {
+		return err
+	}
+	if err := e.Kube.RolloutStatus(ctx, kube.KindDaemonSet, NamespaceCertManager, "cert-manager-csi-driver", timeout); err != nil {
+		return err
+	}
+	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespaceCertManager, "trust-manager", timeout); err != nil {
+		return err
+	}
+
+	if err := e.Kube.ApplyPath(ctx, e.Cfg.Manifest("cert-manager-issuers.yaml")); err != nil {
+		return err
+	}
+	return e.WaitForTrustBundles(ctx)
 }
 
-// WaitForPodCertificateTrustBundles blocks until the podcertificate controller
-// has published both identity bundles.
-func (e *Env) WaitForPodCertificateTrustBundles(ctx context.Context) error {
-	log.Infof("Waiting for podcertificate ClusterTrustBundles to be ready...")
-	return e.Kube.WaitClusterTrustBundles(ctx, trustBundleNames, e.Cfg.WaitTimeout(BootstrapTimeout))
+// WaitForTrustBundles blocks until trust-manager has published both identity
+// trust bundle ConfigMaps in ate-system.
+func (e *Env) WaitForTrustBundles(ctx context.Context) error {
+	log.Infof("Waiting for trust-manager trust bundle ConfigMaps to be ready...")
+	return e.Kube.WaitTrustBundleConfigMaps(ctx, NamespaceAteSystem, trustBundleNames, e.Cfg.WaitTimeout(BootstrapTimeout))
 }
 
 // ensureSecret runs create when the named Secret is absent.

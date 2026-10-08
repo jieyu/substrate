@@ -38,8 +38,8 @@ data:
         port: 8443
         protocol: HTTPS
         tls:
-          cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
-          key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+          cert: /run/servicedns.podcert.ate.dev/tls.crt
+          key: /run/servicedns.podcert.ate.dev/tls.key
 
     backends:
     - name: dynamic
@@ -52,9 +52,9 @@ data:
           mode: connect
           policies:
             backendTLS:
-              cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-              key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-              root: /run/podidentity.podcert.ate.dev/trust-bundle.pem
+              cert: /run/podidentity.podcert.ate.dev/tls.crt
+              key: /run/podidentity.podcert.ate.dev/tls.key
+              root: /run/podidentity-ca/trust-bundle.pem
               insecureHost: true
 
     routes:
@@ -72,8 +72,8 @@ data:
           connectTargetPort: 8443
           policies:
             backendTLS:
-              cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-              key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+              cert: /run/podidentity.podcert.ate.dev/tls.crt
+              key: /run/podidentity.podcert.ate.dev/tls.key
               root: /run/servicedns-ca/trust-bundle.pem
       backends:
       - backend: /dynamic
@@ -90,8 +90,8 @@ data:
       listeners:
       - protocol: HTTPS
         tls:
-          cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
-          key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+          cert: /run/servicedns.podcert.ate.dev/tls.crt
+          key: /run/servicedns.podcert.ate.dev/tls.key
         routes: []
     - mode: internal
       listeners:
@@ -107,8 +107,8 @@ data:
               connectTargetPort: 8443
               policies:
                 backendTLS:
-                  cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-                  key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  cert: /run/podidentity.podcert.ate.dev/tls.crt
+                  key: /run/podidentity.podcert.ate.dev/tls.key
                   root: /run/servicedns-ca/trust-bundle.pem
           backends:
           - backend: /dynamic
@@ -130,8 +130,8 @@ data:
         host: api.ate-system.svc:443
         policies:
           backendTLS:
-            cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-            key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+            cert: /run/podidentity.podcert.ate.dev/tls.crt
+            key: /run/podidentity.podcert.ate.dev/tls.key
             root: /run/servicedns-ca/trust-bundle.pem
 
     binds:
@@ -141,8 +141,8 @@ data:
       listeners:
       - protocol: HTTPS
         tls:
-          cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
-          key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+          cert: /run/servicedns.podcert.ate.dev/tls.crt
+          key: /run/servicedns.podcert.ate.dev/tls.key
           root: /run/actor-id-ca-certs/ca.crt
         # CONNECT re-enters the internal bind below.
         routes: []
@@ -167,8 +167,8 @@ data:
               host: api.ate-system.svc:443
               policies:
                 backendTLS:
-                  cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-                  key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  cert: /run/podidentity.podcert.ate.dev/tls.crt
+                  key: /run/podidentity.podcert.ate.dev/tls.key
                   root: /run/servicedns-ca/trust-bundle.pem
       - protocol: TCP
         tcpRoutes:

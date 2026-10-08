@@ -36,11 +36,11 @@ rules:
 - apiGroups: ["ate.dev"]
   resources: ["sandboxconfigs"]
   verbs: ["get", "list", "watch"]
-# ClusterTrustBundles referenced by SystemInfo trustBundle data sources are
-# resolved on the node: atelet reads them through an informer and projects
-# the sanitized PEM into actors (see cmd/atelet/trustbundle.go).
-- apiGroups: ["certificates.k8s.io"]
-  resources: ["clustertrustbundles"]
+# ConfigMaps referenced by SystemInfo trustBundle data sources (synced by
+# trust-manager) are resolved on the node: atelet reads them through an informer
+# and projects the sanitized PEM into actors (see cmd/atelet/trustbundle.go).
+- apiGroups: [""]
+  resources: ["configmaps"]
   verbs: ["get", "watch", "list"]
 ---
 # 3. Bind Identity to Permissions
@@ -151,8 +151,8 @@ spec:
         image: ko://github.com/agent-substrate/substrate/cmd/atelet
         args:
         - --gcp-auth-for-image-pulls=true
-        - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
-        - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+        - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/tls.crt
+        - --client-ca-certs=/run/podidentity-ca/trust-bundle.pem
         - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
         # Graceful shutdown knobs. The sum must fit within
         # terminationGracePeriodSeconds above.
@@ -233,6 +233,10 @@ spec:
           mountPath: /var/lib/ateom-gvisor
         - name: podidentity
           mountPath: /run/podidentity.podcert.ate.dev
+          readOnly: true
+        - name: podidentity-ca
+          mountPath: /run/podidentity-ca
+          readOnly: true
         - name: servicedns-ca
           mountPath: /run/servicedns.podcert.ate.dev
           readOnly: true
@@ -272,26 +276,24 @@ spec:
       # Identity for mutual TLS with the ate-apiserver. atelet is not behind a
       # Service, so it uses a podidentity (SPIFFE) cert rather than a servicedns
       # serving cert (which requires DNS SANs it would not have); the
-      # clusterTrustBundle verifies the apiserver's client certificate.
+      # podidentity-trust-bundle verifies the apiserver's client certificate.
       - name: podidentity
-        projected:
-          sources:
-          - podCertificate:
-              signerName: podidentity.podcert.ate.dev/identity
-              keyType: ECDSAP256
-              credentialBundlePath: credential-bundle.pem
-          - clusterTrustBundle:
-              signerName: podidentity.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
+        csi:
+          driver: csi.cert-manager.io
+          readOnly: true
+          volumeAttributes:
+            csi.cert-manager.io/issuer-name: podidentity-issuer
+            csi.cert-manager.io/issuer-kind: ClusterIssuer
+            csi.cert-manager.io/common-name: "${POD_UID}"
+            csi.cert-manager.io/dns-names: "${POD_NAME}.${POD_NAMESPACE}.pod.cluster.local"
+            csi.cert-manager.io/uri-sans: "spiffe://cluster.local/ns/${POD_NAMESPACE}/sa/${SERVICE_ACCOUNT_NAME}"
+            csi.cert-manager.io/key-encoding: PKCS8
+            csi.cert-manager.io/key-algorithm: ECDSA
+            csi.cert-manager.io/key-size: "256"
+            csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+      - name: podidentity-ca
+        configMap:
+          name: podidentity-trust-bundle
       - name: servicedns-ca
-        projected:
-          sources:
-          - clusterTrustBundle:
-              signerName: servicedns.podcert.ate.dev/identity
-              labelSelector:
-                matchLabels:
-                  podcert.ate.dev/canarying: live
-              path: trust-bundle.pem
+        configMap:
+          name: servicedns-trust-bundle

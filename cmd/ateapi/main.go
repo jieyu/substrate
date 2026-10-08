@@ -57,6 +57,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -292,7 +293,14 @@ func main() {
 	)
 	reflection.Register(mux)
 	ateapipb.RegisterControlServer(mux, controlSrv)
-	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence))
+	ateapipb.RegisterWorkerServiceServer(mux, workerservice.New(persistence, workerservice.WithNodeResolver(func(podUID string) (string, bool) {
+		for _, obj := range ateletPodInformer.GetStore().List() {
+			if pod, ok := obj.(*corev1.Pod); ok && string(pod.UID) == podUID {
+				return pod.Spec.NodeName, pod.Spec.NodeName != ""
+			}
+		}
+		return "", false
+	})))
 
 	readiness := &serverboot.Readiness{}
 	go serverboot.StartMetricsServer(ctx, serverboot.MetricsServerOptions{

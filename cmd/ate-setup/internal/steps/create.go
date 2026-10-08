@@ -34,8 +34,6 @@ const (
 	SecretActorIDJWTPool   = "actor-id-jwt-pool"
 	SecretActorIDCAPool    = "actor-id-ca-pool"
 	SecretActorIDCACerts   = "actor-id-ca-certs"
-	SecretServiceDNSCA     = "service-dns-ca-pool"
-	SecretPodIdentityCA    = "pod-identity-ca-pool"
 	SecretEgressMITMCAPool = "egress-mitm-ca-pool"
 	ConfigMapAPIEnvVars    = "ate-api-server-envvars"
 	ConfigMapAPIAuthn      = "ate-api-authentication"
@@ -87,19 +85,6 @@ func (e *Env) EnsureEgressMITMCAPoolSecret(ctx context.Context) error {
 		return nil
 	}
 	return e.ensureSecret(ctx, NamespaceAteSystem, SecretEgressMITMCAPool, e.CreateEgressMITMCAPoolSecret)
-}
-
-// CreatePodCertificateControllerCAs generates the two signer pools the
-// podcertificate controller issues from.
-func (e *Env) CreatePodCertificateControllerCAs(ctx context.Context) error {
-	log.Step("create_podcertificate_controller_cas")
-	if err := e.Kube.EnsureNamespace(ctx, NamespacePodCert); err != nil {
-		return err
-	}
-	if err := e.createCAPool(ctx, NamespacePodCert, SecretServiceDNSCA); err != nil {
-		return err
-	}
-	return e.createCAPool(ctx, NamespacePodCert, SecretPodIdentityCA)
 }
 
 // CreateActorIDCACertsSecret derives a certificate-only trust bundle from the

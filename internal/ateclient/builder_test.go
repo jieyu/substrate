@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -117,30 +117,26 @@ func testCAPEM(t *testing.T, cn string) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-func trustBundle(name, signer string, live bool, pemData []byte) *certsv1beta1.ClusterTrustBundle {
-	ctb := &certsv1beta1.ClusterTrustBundle{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: certsv1beta1.ClusterTrustBundleSpec{
-			SignerName:  signer,
-			TrustBundle: string(pemData),
+func trustBundleConfigMap(name string, pemData []byte) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: serviceDNSTrustBundleNamespace,
+			Name:      name,
+		},
+		Data: map[string]string{
+			serviceDNSTrustBundleKey: string(pemData),
 		},
 	}
-	if live {
-		ctb.ObjectMeta.Labels = map[string]string{"podcert.ate.dev/canarying": "live"}
-	}
-	return ctb
 }
 
 func TestServerTLSConfig(t *testing.T) {
 	servicednsCA1 := testCAPEM(t, "servicedns-ca-1")
 	servicednsCA2 := testCAPEM(t, "servicedns-ca-2")
 	podidentityCA := testCAPEM(t, "podidentity-ca")
-	canaryCA := testCAPEM(t, "servicedns-ca-canary")
 
 	clientset := fake.NewSimpleClientset(
-		trustBundle("servicedns.podcert.ate.dev:identity:primary-bundle", serviceDNSSignerName, true, append(servicednsCA1, servicednsCA2...)),
-		trustBundle("podidentity.podcert.ate.dev:identity:primary-bundle", "podidentity.podcert.ate.dev/identity", true, podidentityCA),
-		trustBundle("servicedns.podcert.ate.dev:identity:canary-bundle", serviceDNSSignerName, false, canaryCA),
+		trustBundleConfigMap(serviceDNSTrustBundleConfigMap, append(servicednsCA1, servicednsCA2...)),
+		trustBundleConfigMap("podidentity-trust-bundle", podidentityCA),
 	)
 
 	cfg, err := serverTLSConfig(context.Background(), clientset)
@@ -158,13 +154,12 @@ func TestServerTLSConfig(t *testing.T) {
 		t.Error("InsecureSkipVerify=true, want false")
 	}
 
-	// The pool must contain exactly the live servicedns CAs: not the
-	// podidentity bundle and not the non-live canary bundle.
+	// The pool must contain exactly the servicedns CAs: not the podidentity bundle.
 	wantPool := x509.NewCertPool()
 	wantPool.AppendCertsFromPEM(servicednsCA1)
 	wantPool.AppendCertsFromPEM(servicednsCA2)
 	if !cfg.RootCAs.Equal(wantPool) {
-		t.Error("RootCAs does not match the live servicedns trust bundle")
+		t.Error("RootCAs does not match the servicedns trust bundle")
 	}
 }
 
@@ -175,15 +170,15 @@ func TestServerTLSConfigErrors(t *testing.T) {
 	}{
 		{name: "no bundles"},
 		{
-			name: "only other signers",
+			name: "only other bundles",
 			objects: []runtime.Object{
-				trustBundle("podidentity.podcert.ate.dev:identity:primary-bundle", "podidentity.podcert.ate.dev/identity", true, testCAPEM(t, "podidentity-ca")),
+				trustBundleConfigMap("podidentity-trust-bundle", testCAPEM(t, "podidentity-ca")),
 			},
 		},
 		{
 			name: "bundle with no valid certificates",
 			objects: []runtime.Object{
-				trustBundle("servicedns.podcert.ate.dev:identity:primary-bundle", serviceDNSSignerName, true, []byte("not a pem")),
+				trustBundleConfigMap(serviceDNSTrustBundleConfigMap, []byte("not a pem")),
 			},
 		},
 	} {

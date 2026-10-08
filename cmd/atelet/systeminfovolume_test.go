@@ -28,33 +28,33 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
-	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
 // ctbStore stands in for the informer cache; set replaces the backing
-// ClusterTrustBundle the way a watch event would.
+// trust-bundle ConfigMap the way a watch event would.
 type ctbStore struct {
 	indexer cache.Indexer
-	lister  certlisters.ClusterTrustBundleLister
+	lister  corelisters.ConfigMapNamespaceLister
 }
 
 func newCTBStore(t *testing.T) *ctbStore {
 	t.Helper()
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	return &ctbStore{indexer: indexer, lister: certlisters.NewClusterTrustBundleLister(indexer)}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	return &ctbStore{indexer: indexer, lister: corelisters.NewConfigMapLister(indexer).ConfigMaps(trustBundleConfigNamespace)}
 }
 
-func (s *ctbStore) object(raw string) *certsv1beta1.ClusterTrustBundle {
-	return &certsv1beta1.ClusterTrustBundle{
-		ObjectMeta: metav1.ObjectMeta{Name: egressTrustBundleObjectName},
-		Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: raw},
+func (s *ctbStore) object(raw string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: trustBundleConfigNamespace, Name: egressTrustBundleObjectName},
+		Data:       map[string]string{trustBundleConfigMapKey: raw},
 	}
 }
 
-func (s *ctbStore) set(t *testing.T, raw string) *certsv1beta1.ClusterTrustBundle {
+func (s *ctbStore) set(t *testing.T, raw string) *corev1.ConfigMap {
 	t.Helper()
 	obj := s.object(raw)
 	if err := s.indexer.Add(obj); err != nil {
@@ -669,7 +669,7 @@ func TestSystemInfoVolumeRegister_TrustBundle(t *testing.T) {
 	}
 
 	t.Run("resolution failure fails the start rather than produce an empty trust file", func(t *testing.T) {
-		r := newSystemInfoVolumeRefresher(ctbLister(t), nil)
+		r := newSystemInfoVolumeRefresher(cmLister(t), nil)
 		vol := &systemInfoVolume{Name: "trust", Root: filepath.Join(t.TempDir(), "trust"), Spec: trustVolumeSpec("ca.pem")}
 		err := r.Register("uid-2", resources.ActorRef{Atespace: "team-a", Name: "actor-2"}, []*systemInfoVolume{vol})
 		if err == nil || !strings.Contains(err.Error(), "not found") || !strings.Contains(err.Error(), `"trust"`) {

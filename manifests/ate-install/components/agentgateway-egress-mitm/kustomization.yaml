@@ -37,8 +37,8 @@ patches:
               host: api.ate-system.svc:443
               policies:
                 backendTLS:
-                  cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-                  key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                  cert: /run/podidentity.podcert.ate.dev/tls.crt
+                  key: /run/podidentity.podcert.ate.dev/tls.key
                   root: /run/servicedns-ca/trust-bundle.pem
 
           binds:
@@ -47,8 +47,8 @@ patches:
             listeners:
             - protocol: HTTPS
               tls:
-                cert: /run/servicedns.podcert.ate.dev/credential-bundle.pem
-                key: /run/servicedns.podcert.ate.dev/credential-bundle.pem
+                cert: /run/servicedns.podcert.ate.dev/tls.crt
+                key: /run/servicedns.podcert.ate.dev/tls.key
                 root: /run/actor-id-ca-certs/ca.crt
               routes: []
           - mode: internal
@@ -69,8 +69,8 @@ patches:
                     host: api.ate-system.svc:443
                     policies:
                       backendTLS:
-                        cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-                        key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                        cert: /run/podidentity.podcert.ate.dev/tls.crt
+                        key: /run/podidentity.podcert.ate.dev/tls.key
                         root: /run/servicedns-ca/trust-bundle.pem
             - protocol: HTTP
               routes:
@@ -82,8 +82,8 @@ patches:
                     host: api.ate-system.svc:443
                     policies:
                       backendTLS:
-                        cert: /run/podidentity.podcert.ate.dev/credential-bundle.pem
-                        key: /run/podidentity.podcert.ate.dev/credential-bundle.pem
+                        cert: /run/podidentity.podcert.ate.dev/tls.crt
+                        key: /run/podidentity.podcert.ate.dev/tls.key
                         root: /run/servicedns-ca/trust-bundle.pem
             - protocol: TCP
               tcpRoutes:

@@ -44,8 +44,7 @@ LDFLAGS := -X=$(VERSION_PKG).Version=$(VERSION)
 CONTROL_PLANE_IMAGES := ./cmd/ateapi \
                         ./cmd/atecontroller \
                         ./cmd/atelet \
-                        ./cmd/atenet \
-                        ./cmd/podcertcontroller
+                        ./cmd/atenet
 WORKER_IMAGES        := ./cmd/ateom-gvisor \
                         ./cmd/ateom-microvm
 DEMO_IMAGES          := ./demos/counter \

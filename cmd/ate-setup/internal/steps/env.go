@@ -46,8 +46,8 @@ const (
 
 // Well-known namespaces.
 const (
-	NamespaceAteSystem = "ate-system"
-	NamespacePodCert   = "podcertificate-controller-system"
+	NamespaceAteSystem   = "ate-system"
+	NamespaceCertManager = "cert-manager"
 )
 
 // imageResolver turns a manifest whose image references are ko:// import paths

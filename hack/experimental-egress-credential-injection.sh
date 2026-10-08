@@ -47,8 +47,8 @@ emit_egress_inject_flags() {
 # ateapi client above.
 - --credential-provider-name=${name}
 - --credential-provider-address=${address}
-- --credential-provider-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
-- --credential-provider-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+- --credential-provider-ca-file=/run/servicedns-ca/trust-bundle.pem
+- --credential-provider-client-cert=/run/podidentity.podcert.ate.dev/tls.crt
 - --credential-provider-server-name=${server_name}
 EOF
 }

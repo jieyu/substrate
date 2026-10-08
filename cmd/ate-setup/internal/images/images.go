@@ -46,7 +46,6 @@ var Components = []string{
 	"cmd/atenet",
 	"cmd/ateom-gvisor",
 	"cmd/ateom-microvm",
-	"cmd/podcertcontroller",
 	"demos/counter",
 	"demos/egress",
 	"demos/multi-template/fspersist",

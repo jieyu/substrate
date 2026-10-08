@@ -16,7 +16,6 @@ package e2e
 
 import (
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -66,8 +65,8 @@ func TestProbeTemplate_TrustBundle(t *testing.T) {
 			}
 			// The projected name must select the bundle atecontroller
 			// publishes, or actors fail closed on a name atelet rejects.
-			if !strings.HasPrefix(EgressTrustBundleObjectName, source.GetName()+":") {
-				t.Errorf("trustBundle name = %q, want the bundle backing %q", source.GetName(), EgressTrustBundleObjectName)
+			if source.GetName() != EgressTrustBundleName {
+				t.Errorf("trustBundle name = %q, want %q", source.GetName(), EgressTrustBundleName)
 			}
 			if source.GetPath() == "" {
 				t.Error("trustBundle projection has no path")

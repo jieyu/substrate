@@ -1367,15 +1367,17 @@ func adsConfigSource() *corev3.ConfigSource {
 }
 
 // buildCertSecret returns the SDS secret named name, serving the credential
-// bundle at path.
+// at path. When path names tls.crt (as mounted by cert-manager-csi-driver),
+// the private key is read from the sibling tls.key file in the same directory.
 func buildCertSecret(name, path string) *tlsv3.Secret {
+	keyPath := path
+	if filepath.Base(path) == "tls.crt" {
+		keyPath = filepath.Join(filepath.Dir(path), "tls.key")
+	}
 	return &tlsv3.Secret{
 		Name: name,
 		Type: &tlsv3.Secret_TlsCertificate{
 			TlsCertificate: &tlsv3.TlsCertificate{
-				// The pod certificate is projected as a single PEM bundle
-				// holding both the cert chain and the private key, so both
-				// DataSources point at the same file.
 				CertificateChain: &corev3.DataSource{
 					Specifier: &corev3.DataSource_Filename{
 						Filename: path,
@@ -1383,10 +1385,10 @@ func buildCertSecret(name, path string) *tlsv3.Secret {
 				},
 				PrivateKey: &corev3.DataSource{
 					Specifier: &corev3.DataSource_Filename{
-						Filename: path,
+						Filename: keyPath,
 					},
 				},
-				// By specifying WatchedDirectory, we tell envoy to watch changes to the mounted pod certificate file.
+				// By specifying WatchedDirectory, we tell envoy to watch changes to the mounted certificate files.
 				// See documentation in https://pkg.go.dev/github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3#:~:text=This%20only%20applies%20when%20a%20%E2%80%9CTlsCertificate%E2%80%9C%20is%20delivered%20by%20SDS
 				WatchedDirectory: &corev3.WatchedDirectory{
 					Path: filepath.Dir(path),

@@ -206,9 +206,23 @@ wait_for_pool_rollout_fatal() {
 }
 
 run_kubectl_ate() {
-  go run ./cmd/kubectl-ate \
-    ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} \
-    "$@"
+  local bin=""
+  if command -v kubectl-ate >/dev/null 2>&1; then
+    bin="kubectl-ate"
+  elif [[ -x "${ROOT}/bin/kubectl-ate" ]]; then
+    bin="${ROOT}/bin/kubectl-ate"
+  elif [[ -x "${GOPATH:-${HOME}/go}/bin/kubectl-ate" ]]; then
+    bin="${GOPATH:-${HOME}/go}/bin/kubectl-ate"
+  fi
+  if [[ -n "${bin}" ]]; then
+    "${bin}" \
+      ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} \
+      "$@"
+  else
+    go run ./cmd/kubectl-ate \
+      ${KUBECTL_CONTEXT:+--context=${KUBECTL_CONTEXT}} \
+      "$@"
+  fi
 }
 
 run_ko() {
@@ -265,7 +279,7 @@ rollout_timeout() {
 }
 
 default_postgres_connection_string() {
-  echo "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns.podcert.ate.dev/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/credential-bundle.pem&sslkey=/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+  echo "postgresql://postgres@postgres.ate-system.svc:5432/atepg?sslmode=verify-full&sslrootcert=/run/servicedns-ca/trust-bundle.pem&sslcert=/run/podidentity.podcert.ate.dev/tls.crt&sslkey=/run/podidentity.podcert.ate.dev/tls.key"
 }
 
 # True if deploying the bundled in-cluster PostgreSQL. Returns false if an
@@ -576,25 +590,30 @@ ensure_egress_mitm_ca_pool_secret() {
     || create_egress_mitm_ca_pool_secret
 }
 
-create_podcertificate_controller_cas() {
-  log_step "create_podcertificate_controller_cas"
-  run_kubectl create namespace podcertificate-controller-system || true
-  run_kubectl_ate admin make-ca-pool \
-    --ca-id="1" \
-    --name="service-dns-ca-pool" \
-    --secret-namespace=podcertificate-controller-system
-  run_kubectl_ate admin make-ca-pool \
-    --ca-id="1" \
-    --name="pod-identity-ca-pool" \
-    --secret-namespace=podcertificate-controller-system
+ensure_cert_manager() {
+  log_step "ensure_cert_manager"
+  run_kubectl create namespace cert-manager --dry-run=client -o yaml \
+    | run_kubectl apply -f -
+  run_kubectl apply -f hack/third_party/cert-manager/deploy/cert-manager.yaml
+  run_kubectl rollout status deployment/cert-manager -n cert-manager --timeout=120s
+  run_kubectl rollout status deployment/cert-manager-cainjector -n cert-manager --timeout=120s
+  run_kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=120s
+
+  run_kubectl apply -f hack/third_party/cert-manager/deploy/cert-manager-csi-driver.yaml
+  run_kubectl apply -f hack/third_party/cert-manager/deploy/trust-manager.yaml
+  run_kubectl rollout status daemonset/cert-manager-csi-driver -n cert-manager --timeout=120s
+  run_kubectl rollout status deployment/trust-manager -n cert-manager --timeout=120s
+
+  run_kubectl apply -f manifests/ate-install/cert-manager-issuers.yaml
+  wait_for_trust_bundles
 }
 
-wait_for_podcertificate_trust_bundles() {
-  echo "Waiting for podcertificate ClusterTrustBundles to be ready..."
-  until run_kubectl get clustertrustbundles podidentity.podcert.ate.dev:identity:primary-bundle >/dev/null 2>&1; do
+wait_for_trust_bundles() {
+  echo "Waiting for trust-manager trust bundle ConfigMaps to be ready..."
+  until [[ -n "$(run_kubectl get configmap -n ate-system podidentity-trust-bundle -o jsonpath='{.data.trust-bundle\.pem}' 2>/dev/null)" ]]; do
     sleep 1
   done
-  until run_kubectl get clustertrustbundles servicedns.podcert.ate.dev:identity:primary-bundle >/dev/null 2>&1; do
+  until [[ -n "$(run_kubectl get configmap -n ate-system servicedns-trust-bundle -o jsonpath='{.data.trust-bundle\.pem}' 2>/dev/null)" ]]; do
     sleep 1
   done
 }
@@ -814,26 +833,6 @@ create_api_server_env_vars() {
   annotate_api_server_env_hash
 }
 
-apply_podcert_workers_override() {
-  if [[ -z "${ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER:-}" ]]; then
-    return 0
-  fi
-
-  local workers=""
-  workers="$(podcert_workers_per_signer)"
-
-  local current=""
-  current="$(run_kubectl -n podcertificate-controller-system get deployment/podcertificate-controller \
-    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="WORKERS_PER_SIGNER")].value}' 2>/dev/null || true)"
-  if [[ "${current}" == "${workers}" ]]; then
-    return 0
-  fi
-
-  echo "Overriding WORKERS_PER_SIGNER with ${workers}"
-  run_kubectl -n podcertificate-controller-system set env deployment/podcertificate-controller \
-    WORKERS_PER_SIGNER="${workers}"
-}
-
 create_api_authentication_config() {
   log_step "create_api_authentication_config"
   run_kubectl create namespace ate-system --dry-run=client -o yaml \
@@ -956,16 +955,11 @@ deploy_ate_system() {
 
   ensure_apiserver_prerequisites
 
-  # Deploy podcertificate-controller first so it starts signing and creating trust bundles immediately
-  run_ko apply -f manifests/ate-install/pod-certificate-controller.yaml
-  apply_podcert_workers_override
-  run_kubectl rollout status deployment/podcertificate-controller -n podcertificate-controller-system --timeout=120s
+  # Deploy cert-manager, cert-manager-csi-driver, trust-manager, and Substrate issuers/bundles first
+  ensure_cert_manager
 
-  wait_for_podcertificate_trust_bundles
-
-  # CSI setup must run after podcertificate-controller is ready and trust bundles
-  # exist. The ghostunnel sidecar uses projected podCertificate and clusterTrustBundle
-  # volumes which cannot be fulfilled until podcertcontroller is actively signing,
+  # CSI setup must run after cert-manager and trust-manager are ready and trust bundles
+  # exist. The envoy sidecar uses CSI certificates and trust bundle ConfigMaps,
   # otherwise rollout of csi-hostpath-socat times out.
   #
   # setup_csi is a no-op unless --setup-csi asked for a driver, and it is the
@@ -1020,8 +1014,6 @@ ensure_apiserver_prerequisites() {
   # Derived from actor-id-ca-pool above, so it must come after it.
   run_kubectl get secret -n ate-system actor-id-ca-certs >/dev/null 2>&1 \
     || create_actor_id_ca_certs_secret
-  run_kubectl get secret -n podcertificate-controller-system service-dns-ca-pool >/dev/null 2>&1 \
-    || create_podcertificate_controller_cas
   # Always reconcile the PostgreSQL connection settings.
   create_api_server_env_vars
   run_kubectl get configmap -n ate-system ate-api-authentication >/dev/null 2>&1 \
@@ -1683,7 +1675,6 @@ while [[ "$#" -gt 0 ]]; do
     --create-actor-id-ca-pool-secret) create_actor_id_ca_pool_secret ;;
     --create-actor-id-ca-certs-secret) create_actor_id_ca_certs_secret ;;
     --create-egress-mitm-ca-pool-secret) create_egress_mitm_ca_pool_secret ;;
-    --create-podcertificate-controller-cas) create_podcertificate_controller_cas ;;
     --create-api-server-env-vars) ensure_env_vars_safe_standalone; create_api_server_env_vars ;;
     --create-api-authentication-config) create_api_authentication_config ;;
 

@@ -66,7 +66,7 @@ const (
 	// podIdentityCredentialPath is the probe's own workload identity: a valid
 	// substrate credential that is not an actor. It is mounted so the suite can
 	// show the gateway refusing it.
-	podIdentityCredentialPath = "/run/podidentity.podcert.ate.dev/credential-bundle.pem"
+	podIdentityCredentialPath = "/run/podidentity.podcert.ate.dev/tls.crt"
 )
 
 // actorIdentityCA returns the CA that signs actor certificates, straight from
